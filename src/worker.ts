@@ -3,6 +3,7 @@ import { createHmac } from "node:crypto";
 import { handle, type Target, type HowTo } from "./actions.ts";
 import { addressFor, checkProxy, Computer, egressFor, type ProxyCheck } from "./computer.ts";
 import { HELP } from "./help.ts";
+import { detached } from "./detach.ts";
 import { abandoned, Leases, mayUse, proxyChoice, sharedComputers, summarize, type Demonstration, type SharedComputer, type Step } from "./learning.ts";
 
 let ctx: PluginContext;
@@ -81,17 +82,18 @@ async function start(companyId: string, config: Record<string, unknown>): Promis
       if (before !== r.ok) ctx.logger[r.ok ? "info" : "warn"](r.ok ? "a proxy is working; computers use it again" : "a proxy is down; computers using it go out directly until it is back", { companyId, proxy: p.name, ...(r.ok ? {} : { err: (r as { error: string }).error }) });
     }
   };
-  void checkAll();
+  detached(() => void checkAll());
   const t: Tenant = {
     computer: new Computer(url, token, fetch, upstream), token, sites, shared,
     gatewayUrl: (typeof config.gatewayUrl === "string" && config.gatewayUrl.trim()) || "http://agent-computer-gateway:4200",
     // Leases and takeovers survive a settings save.
     leases: old?.leases ?? new Leases(), takenAt: old?.takenAt ?? new Map(), chrome: old?.chrome ?? new Map(),
     pending: old?.pending ?? new Map(), lastUsed: old?.lastUsed ?? new Map(), steered: old?.steered ?? new Set(),
-    proxies, proxyHealth, proxyFor, fallback, timers: [
+    // Started outside the settings-save invocation: host calls from a timer inside it are refused once it ends.
+    proxies, proxyHealth, proxyFor, fallback, timers: detached(() => [
       ...(proxies.size ? [setInterval(() => void checkAll(), PROXY_CHECK_MS)] : []),
       setInterval(() => void handBackAbandoned(companyId).catch((err) => ctx.logger.warn("abandoned-computer check failed", { companyId, err: errText(err) })), 60_000),
-    ],
+    ]),
     // Signs live-screen tickets; gateway/gateway.ts derives the same key from the same token.
     ticketKey: createHmac("sha256", token).update("agent-computer stream tickets").digest(),
   };
@@ -193,10 +195,10 @@ const plugin = definePlugin({
       return r;
     });
     // A new version's skill text reaches the companies already set up, without waiting for a settings save.
-    setTimeout(() => {
+    detached(() => setTimeout(() => {
       void ctx.state.get(BOOT).then((all) => Promise.all(Object.keys((all as Record<string, unknown> | null) ?? {}).map((id) => ensureSkill(id))))
         .catch((err) => ctx.logger.warn("could not refresh the Agent computer skill", { err: errText(err) }));
-    }, 15_000);
+    }, 15_000));
 
     // The Computers page. Only people: an agent calling these could watch or steer another agent's browser.
     const person = (context: { actor: { type: string } }) => {
