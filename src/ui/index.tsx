@@ -180,7 +180,7 @@ export function ComputersLink({ context }: PluginSidebarProps) {
 /** Every agent's browser; ?agent=<id> picks one (the Mattermost Take over button links there). */
 export function ComputersPage({ context }: PluginPageProps) {
   const companyId = context.companyId;
-  const browsers = usePluginAction("computers");
+  const computers = usePluginAction("computers");
   const [list, setList] = useState<{ agents: { id: string; name: string }[]; shared: { id: string; name: string; inUseBy: string | null }[] } | null>(null);
   const [agentId, setAgentId] = useState<string | null>(() => new URLSearchParams(window.location.search).get("agent"));
   useEffect(() => {
