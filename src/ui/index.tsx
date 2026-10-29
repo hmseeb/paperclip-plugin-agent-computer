@@ -181,6 +181,18 @@ export function ComputersLink({ context }: PluginSidebarProps) {
 export function ComputersPage({ context }: PluginPageProps) {
   const companyId = context.companyId;
   const computers = usePluginAction("computers");
+  const attention = usePluginAction("attention");
+  const [needs, setNeeds] = useState<Map<string, string>>(new Map());
+  useEffect(() => {
+    if (!companyId) return;
+    let live = true;
+    const load = () => attention({ companyId, chat: "" }).then((r) => {
+      if (live) setNeeds(new Map((r as Attention).pending.map((p) => [p.bot, p.kind === "password" ? p.reason : `Needs you: ${p.reason}`])));
+    }).catch(() => undefined);
+    void load();
+    const timer = setInterval(load, 3000);
+    return () => { live = false; clearInterval(timer); };
+  }, [companyId]);
   const [list, setList] = useState<{ agents: { id: string; name: string }[]; shared: { id: string; name: string; inUseBy: string | null }[] } | null>(null);
   const [agentId, setAgentId] = useState<string | null>(() => new URLSearchParams(window.location.search).get("agent"));
   useEffect(() => {
@@ -212,8 +224,12 @@ export function ComputersPage({ context }: PluginPageProps) {
   };
   if (!companyId) return null;
   const item = (id: string, label: string, sub?: string | null) => (
-    <button key={id} onClick={() => pick(id)} style={{ ...s.button, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", display: "grid", ...(id === agentId ? { borderColor: "#2f6fed" } : { borderColor: "transparent" }) }}>
-      <span>{label}</span>{sub ? <span style={{ ...s.help, fontSize: 11.5 }}>{sub}</span> : null}
+    <button key={id} onClick={() => pick(id)} title={needs.get(id) ?? undefined} style={{ ...s.button, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", display: "grid", ...(id === agentId ? { borderColor: "#2f6fed" } : needs.has(id) ? { borderColor: "rgba(242,169,0,.7)" } : { borderColor: "transparent" }) }}>
+      <span style={{ display: "flex", gap: 8, alignItems: "center", minWidth: 0 }}>
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{label}</span>
+        {needs.has(id) ? <span style={{ flex: "none", fontSize: 11, fontWeight: 600, padding: "1px 7px", borderRadius: 999, background: "rgba(242,169,0,.18)", color: "#f2a900" }}>Needs you</span> : null}
+      </span>
+      {sub ? <span style={{ ...s.help, fontSize: 11.5 }}>{sub}</span> : null}
     </button>
   );
   const isShared = Boolean(list?.shared.some((b) => b.id === agentId));
@@ -396,6 +412,8 @@ export function ComputerOverlay({ context }: PluginSidebarProps) {
   const [att, setAtt] = useState<Attention | null>(null);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
   const [chosen, setChosen] = useState<string | null>(null);
+  /** Requests on screen when the card was minimized; a new one opens it again. */
+  const [minimized, setMinimized] = useState<Set<string>>(new Set());
   /** The computer open full size. Held on its own: once taken over it is no longer "waiting", but stays open. */
   const [expanded, setExpanded] = useState<{ bot: string; agentName: string; computer: string | null } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -418,7 +436,8 @@ export function ComputerOverlay({ context }: PluginSidebarProps) {
   }, [companyId]);
 
   // Not the computer already on screen in the Computers page, and not ones hidden with ×.
-  const onScreen = /\/computer$/.test(window.location.pathname) ? new URLSearchParams(window.location.search).get("agent") : null;
+  // On the Computers page the list marks who needs you, so the card stays out of the way there.
+  const onScreen = /\/computer$/.test(window.location.pathname) ? new URLSearchParams(window.location.search).get("agent") ?? "" : null;
   const keyOf = (p: { bot: string; at: number }) => `${p.bot}:${p.at}`;
   const waiting = (att?.pending ?? []).filter((p) => p.bot !== onScreen && !dismissed.has(keyOf(p)));
   const ask = waiting.find((p) => p.bot === chosen) ?? waiting[0] ?? null;
@@ -445,19 +464,31 @@ export function ComputerOverlay({ context }: PluginSidebarProps) {
       </div>
     );
   }
-  if (!target) return null;
+  if (!target || onScreen !== null) return null;
 
   const takeOver = async () => {
     setBusy(true);
     try { await control({ companyId, agentId: bot, op: "take" }); setExpanded({ bot, agentName: target.agentName, computer: ask?.computer ?? null }); } catch (e) { setProblem(errText(e)); } finally { setBusy(false); }
   };
   const title = `${target.agentName}${ask?.computer ? ` · shared ${ask.computer} computer` : "'s computer"}`;
+  const shownKeys = [...waiting.map(keyOf), ...(active && !ask ? [`${active.bot}:active`] : [])];
+  if (shownKeys.length && shownKeys.every((k) => minimized.has(k))) {
+    return (
+      <button onClick={() => setMinimized(new Set())} title="Show"
+        className="bg-background text-foreground"
+        style={{ display: "flex", alignItems: "center", gap: 8, maxWidth: 300, padding: "8px 12px", borderRadius: 999, border: `1px solid ${ask ? "rgba(242,169,0,.7)" : "rgba(127,127,127,.35)"}`, boxShadow: "0 6px 20px rgba(0,0,0,.3)", font: "inherit", fontSize: 13, cursor: "pointer" }}>
+        <span style={{ width: 8, height: 8, borderRadius: 8, flex: "none", background: ask ? "#f2a900" : "#2e9e6a" }} />
+        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontWeight: 600 }}>{ask ? (waiting.length > 1 ? `${waiting.length} agents need you` : `${target.agentName} needs you`) : title}</span>
+      </button>
+    );
+  }
 
   return (
     <div className="bg-background text-foreground" style={{ width: 360, borderRadius: 12, overflow: "hidden", border: `1px solid ${ask ? "rgba(242,169,0,.7)" : "rgba(127,127,127,.35)"}`, boxShadow: "0 10px 30px rgba(0,0,0,.35)" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px" }}>
         <span style={{ width: 8, height: 8, borderRadius: 8, flex: "none", background: ask ? "#f2a900" : "#2e9e6a" }} />
         <span style={{ fontWeight: 600, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>{title}</span>
+        <button aria-label="Minimize" title="Minimize" style={{ ...s.button, padding: "2px 8px" }} onClick={() => setMinimized(new Set([...minimized, ...shownKeys]))}>–</button>
         <button aria-label="Open full size" title="Open full size" style={{ ...s.button, padding: "2px 8px" }} onClick={() => setExpanded({ bot, agentName: target.agentName, computer: ask?.computer ?? null })}>⤢</button>
         <button aria-label="Hide" title="Hide" style={{ ...s.button, padding: "2px 8px" }} onClick={() => { if (key) setDismissed(new Set([...dismissed, key])); setChosen(null); }}>×</button>
       </div>
