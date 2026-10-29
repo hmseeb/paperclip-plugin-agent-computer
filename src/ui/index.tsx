@@ -360,3 +360,90 @@ function LiveView({ companyId, agentId }: { companyId: string; agentId: string }
     </div>
   );
 }
+
+type Attention = {
+  pending: { bot: string; agentName: string; computer: string | null; kind: string; reason: string; at: number }[];
+  active: { bot: string; agentName: string } | null;
+};
+
+/**
+ * On every page, bottom right: a small live screen of a computer that needs a person (any page), or
+ * of the agent being chatted with while it uses its computer. Click it to open it full size and take over.
+ */
+export function ComputerOverlay({ context }: PluginSidebarProps) {
+  const companyId = context.companyId;
+  const attention = usePluginAction("attention");
+  const control = usePluginAction("control");
+  const streamTicket = usePluginAction("stream-ticket");
+  const [att, setAtt] = useState<Attention | null>(null);
+  const [dismissed, setDismissed] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!companyId) return;
+    let live = true;
+    const loop = async () => {
+      while (live) {
+        if (document.visibilityState === "visible") {
+          const chat = /\/chats\/([^/?#]+)/.exec(window.location.pathname)?.[1] ?? "";
+          try { const a = (await attention({ companyId, chat: decodeURIComponent(chat) })) as Attention; if (live) setAtt(a); } catch { /* next round */ }
+        }
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+    };
+    void loop();
+    return () => { live = false; };
+  }, [companyId]);
+
+  const ask = att?.pending[0] ?? null;
+  const target = ask ? { bot: ask.bot, agentName: ask.agentName } : att?.active ?? null;
+  const key = target ? `${target.bot}:${ask?.at ?? "active"}` : null;
+  const bot = target?.bot ?? "";
+  const ticket = useCallback(async () => ((await streamTicket({ companyId, agentId: bot })) as { path: string }).path, [companyId, bot]);
+  const onProblem = useCallback((p: string | null) => setProblem(p), []);
+  if (!companyId || !target || (!expanded && key === dismissed)) return null;
+
+  const takeOver = async () => {
+    setBusy(true);
+    try { await control({ companyId, agentId: bot, op: "take" }); setExpanded(true); } catch (e) { setProblem(errText(e)); } finally { setBusy(false); }
+  };
+  const title = `${target.agentName}${ask?.computer ? ` · shared ${ask.computer} computer` : "'s computer"}`;
+
+  if (expanded) {
+    return (
+      <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,.55)", display: "grid", placeItems: "center", padding: 24 }} onClick={(e) => { if (e.target === e.currentTarget) setExpanded(false); }}>
+        <div className="bg-background text-foreground" style={{ width: "min(1320px, 96vw)", maxHeight: "94vh", overflow: "auto", borderRadius: 14, padding: 16, boxShadow: "0 20px 60px rgba(0,0,0,.45)" }}>
+          <div style={{ ...s.row, marginBottom: 10 }}>
+            <span style={{ fontWeight: 600 }}>{title}</span>
+            <span style={{ flex: 1 }} />
+            <a href={`/${context.companyPrefix ?? ""}/computer?agent=${bot}`} style={{ ...s.help, color: "inherit" }}>Open in Computers</a>
+            <button style={s.button} onClick={() => setExpanded(false)}>Minimize</button>
+          </div>
+          <LiveView key={bot} companyId={companyId} agentId={bot} />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-background text-foreground" style={{ width: 360, borderRadius: 12, overflow: "hidden", border: `1px solid ${ask ? "rgba(242,169,0,.7)" : "rgba(127,127,127,.35)"}`, boxShadow: "0 10px 30px rgba(0,0,0,.35)" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px" }}>
+        <span style={{ width: 8, height: 8, borderRadius: 8, flex: "none", background: ask ? "#f2a900" : "#2e9e6a" }} />
+        <span style={{ fontWeight: 600, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>{title}</span>
+        <button aria-label="Open full size" title="Open full size" style={{ ...s.button, padding: "2px 8px" }} onClick={() => setExpanded(true)}>⤢</button>
+        <button aria-label="Hide" title="Hide" style={{ ...s.button, padding: "2px 8px" }} onClick={() => setDismissed(key)}>×</button>
+      </div>
+      {ask ? <div style={{ padding: "0 10px 8px", fontSize: 12.5 }}>{ask.kind === "password" ? `Needs your ${ask.reason.replace(/^needs your /, "")}.` : `Needs you: ${ask.reason}`}</div> : null}
+      <div style={{ cursor: "pointer", background: "rgba(127,127,127,.18)" }} onClick={() => setExpanded(true)} title="Open full size">
+        <LiveScreen ticket={ticket} driving={false} onProblem={onProblem} />
+      </div>
+      {ask ? (
+        <div style={{ display: "flex", gap: 8, padding: 10 }}>
+          <button style={{ ...s.button, ...s.primary, flex: 1 }} disabled={busy} onClick={() => void (ask.kind === "password" ? Promise.resolve(setExpanded(true)) : takeOver())}>{ask.kind === "password" ? "Enter it" : "Take over"}</button>
+        </div>
+      ) : problem ? <div style={{ ...s.help, padding: "6px 10px" }}>{problem}</div> : null}
+    </div>
+  );
+}

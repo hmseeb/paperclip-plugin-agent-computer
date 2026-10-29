@@ -6,14 +6,14 @@ const route = (routeKey: string, method: "GET" | "POST", path: string) => ({ rou
 const manifest: PaperclipPluginManifestV1 = {
   id: "agent-computer",
   apiVersion: 1,
-  version: "0.2.0",
+  version: "0.3.0",
   displayName: "Agent computer",
   description: "A computer per agent that keeps its logins, plus shared computers. Watch them live on the Computers page, take over for logins and 2FA, type passwords the agent never sees, and teach agents by doing.",
   author: "Haseeb Azhar",
   categories: ["connector"],
   capabilities: [
     "agents.read", "companies.read", "secrets.read-ref", "http.outbound", "plugin.state.read", "plugin.state.write",
-    "api.routes.register", "skills.managed", "events.emit", "instance.settings.register", "ui.page.register", "ui.sidebar.register",
+    "api.routes.register", "skills.managed", "events.emit", "instance.settings.register", "ui.page.register", "ui.sidebar.register", "ui.action.register",
   ],
   entrypoints: { worker: "./dist/worker.js", ui: "./dist/ui" },
   apiRoutes: [
@@ -44,6 +44,8 @@ const manifest: PaperclipPluginManifestV1 = {
       // A page, not an agent tab: this Paperclip's agent page shows no plugin tabs. /<company>/computer?agent=<id>
       { type: "page", id: "computers", displayName: "Computers", exportName: "ComputersPage", routePath: "computer" },
       { type: "sidebar", id: "computers-link", displayName: "Computers", exportName: "ComputersLink" },
+      // On every page: a small live screen when an agent needs a person, or of the agent being chatted with.
+      { type: "appShellOverlay", id: "computer-overlay", displayName: "Agent computer", exportName: "ComputerOverlay" },
     ],
   },
   instanceConfigSchema: {
