@@ -53,7 +53,10 @@ export function summarize(steps: Step[]): string[] {
   return out.map((line) => (line.startsWith("On ") && line.endsWith(":") ? line : `${++n}. ${line}`));
 }
 
-export interface SharedBrowser { id: string; name: string; agents: string[]; sites: string[] }
+/** `allAgents` (the default): every agent of the company, new ones included; otherwise only `agents`. */
+export interface SharedBrowser { id: string; name: string; allAgents: boolean; agents: string[]; sites: string[] }
+
+export const mayUse = (b: SharedBrowser, agentId: string) => b.allAgents || b.agents.includes(agentId);
 
 /** Which browser a call uses: the agent's own, or a shared one it is allowed, leased to one agent at a time. */
 export class Leases {
@@ -90,5 +93,5 @@ export function sharedBrowsers(config: Record<string, unknown>): SharedBrowser[]
   const list = Array.isArray(config.sharedBrowsers) ? (config.sharedBrowsers as Partial<SharedBrowser>[]) : [];
   return list
     .filter((b): b is SharedBrowser => typeof b?.id === "string" && /^shared-[a-z0-9-]{1,50}$/.test(b.id) && typeof b.name === "string")
-    .map((b) => ({ id: b.id, name: b.name, agents: Array.isArray(b.agents) ? b.agents : [], sites: Array.isArray(b.sites) ? b.sites : [] }));
+    .map((b) => ({ id: b.id, name: b.name, allAgents: b.allAgents !== false, agents: Array.isArray(b.agents) ? b.agents : [], sites: Array.isArray(b.sites) ? b.sites : [] }));
 }

@@ -41,5 +41,13 @@ test("a shared browser is leased to one agent at a time, renewed by use, freed b
 
 test("shared browsers from settings: only well-formed ids", () => {
   assert.deepEqual(sharedBrowsers({ sharedBrowsers: [{ id: "shared-ghl", name: "GoHighLevel", agents: ["a"] }, { id: "../etc", name: "x" }] }),
-    [{ id: "shared-ghl", name: "GoHighLevel", agents: ["a"], sites: [] }]);
+    [{ id: "shared-ghl", name: "GoHighLevel", allAgents: true, agents: ["a"], sites: [] }]);
+});
+
+test("a shared browser is for every agent unless the board picks some", async () => {
+  const { mayUse } = await import("../src/learning.ts");
+  const [all, picked] = sharedBrowsers({ sharedBrowsers: [{ id: "shared-a", name: "A" }, { id: "shared-b", name: "B", allAgents: false, agents: ["cto"] }] });
+  assert.equal(mayUse(all, "anyone"), true, "all agents by default, new ones included");
+  assert.equal(mayUse(picked, "cto"), true);
+  assert.equal(mayUse(picked, "ceo"), false);
 });

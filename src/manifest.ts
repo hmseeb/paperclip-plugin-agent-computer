@@ -56,7 +56,7 @@ const manifest: PaperclipPluginManifestV1 = {
       sharedBrowsers: {
         type: "array", title: "Shared browsers",
         description: "Named browsers several agents use, one at a time (e.g. one logged into GoHighLevel).",
-        items: { type: "object", properties: { id: { type: "string" }, name: { type: "string" }, agents: { type: "array", items: { type: "string" } }, sites: { type: "array", items: { type: "string" } } }, required: ["id", "name"] },
+        items: { type: "object", properties: { id: { type: "string" }, name: { type: "string" }, allAgents: { type: "boolean", default: true }, agents: { type: "array", items: { type: "string" } }, sites: { type: "array", items: { type: "string" } } }, required: ["id", "name"] },
       },
       sites: {
         type: "array", title: "Allowed sites per agent",

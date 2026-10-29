@@ -3,7 +3,7 @@ import { createHmac } from "node:crypto";
 import { handle, type Browser, type HowTo } from "./actions.ts";
 import { addressFor, Computer, egressFor } from "./computer.ts";
 import { HELP } from "./help.ts";
-import { Leases, sharedBrowsers, summarize, type Demonstration, type SharedBrowser, type Step } from "./learning.ts";
+import { Leases, mayUse, sharedBrowsers, summarize, type Demonstration, type SharedBrowser, type Step } from "./learning.ts";
 
 let ctx: PluginContext;
 const errText = (err: unknown) => String((err as Error)?.message ?? err);
@@ -252,14 +252,14 @@ const plugin = definePlugin({
         if (!name) return { bot: id, label: "your browser", sites: t.sites.get(id) ?? [], shared: false };
         const b = findShared(t, name);
         if (!b) return { status: 404, error: `There is no shared browser "${name}". /pc/browsers lists yours.` };
-        if (!b.agents.includes(id)) return { status: 403, error: `You are not assigned the shared browser "${b.name}"; the board assigns them in the plugin settings.` };
+        if (!mayUse(b, id)) return { status: 403, error: `You are not assigned the shared browser "${b.name}"; the board assigns them in the plugin settings.` };
         const lease = t.leases.take(b.id, id);
         if (!lease.ok) return { status: 409, error: `"${b.name}" is in use by ${await nameOf(lease.holder)}. Try again in a few minutes; it frees up 10 minutes after their last use.` };
         return { bot: b.id, label: b.name, sites: b.sites, shared: true };
       },
       async browsers(id) {
         return [{ name: "your own", shared: false, inUseBy: null },
-          ...await Promise.all(t.shared.filter((b) => b.agents.includes(id)).map(async (b) => ({ name: b.name, shared: true, inUseBy: await nameOf(t.leases.holder(b.id)) })))];
+          ...await Promise.all(t.shared.filter((b) => mayUse(b, id)).map(async (b) => ({ name: b.name, shared: true, inUseBy: await nameOf(t.leases.holder(b.id)) })))];
       },
       async release(id, name) {
         const b = findShared(t, name);

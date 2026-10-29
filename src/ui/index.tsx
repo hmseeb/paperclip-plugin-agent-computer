@@ -41,7 +41,7 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
   const [secrets, setSecrets] = useState<Secret[]>([]);
   const [agents, setAgents] = useState<AgentRow[]>([]);
   const [sites, setSites] = useState<Record<string, string>>({});
-  const [shared, setShared] = useState<{ id: string; name: string; agents: string[]; sites: string }[]>([]);
+  const [shared, setShared] = useState<{ id: string; name: string; allAgents: boolean; agents: string[]; sites: string }[]>([]);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [saving, setSaving] = useState(false);
   const setup = usePluginData<{ connected: boolean; status: string }>("setup", { companyId });
@@ -58,8 +58,8 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
       setConfig({ computerUrl: "http://agent-computer:4100", ...c });
       setSecrets(secs.filter((x) => !x.deletedAt && x.status !== "deleted"));
       setAgents(ags.filter((a) => a.status !== "terminated"));
-      setShared((Array.isArray(c.sharedBrowsers) ? (c.sharedBrowsers as { id: string; name: string; agents?: string[]; sites?: string[] }[]) : [])
-        .map((b) => ({ id: b.id, name: b.name, agents: b.agents ?? [], sites: (b.sites ?? []).join(", ") })));
+      setShared((Array.isArray(c.sharedBrowsers) ? (c.sharedBrowsers as { id: string; name: string; allAgents?: boolean; agents?: string[]; sites?: string[] }[]) : [])
+        .map((b) => ({ id: b.id, name: b.name, allAgents: b.allAgents !== false, agents: b.agents ?? [], sites: (b.sites ?? []).join(", ") })));
       setSites(Object.fromEntries((Array.isArray(c.sites) ? (c.sites as { agentId: string; sites?: string[] }[]) : []).map((x) => [x.agentId, (x.sites ?? []).join(", ")])));
     }).catch((e) => setNote({ ok: false, text: `Could not load the settings: ${errText(e)}` }));
   }, [companyId]);
@@ -76,7 +76,10 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
     try {
       const list = Object.entries(sites).map(([agentId, v]) => ({ agentId, sites: v.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean) })).filter((x) => x.sites.length);
       const split = (v: string) => v.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
-      const sharedBrowsers = shared.filter((b) => b.name.trim()).map((b) => ({ id: b.id, name: b.name.trim(), agents: b.agents, sites: split(b.sites) }));
+      const named = shared.filter((b) => b.name.trim());
+      const dup = named.find((b, i) => named.findIndex((x) => x.name.trim().toLowerCase() === b.name.trim().toLowerCase()) !== i);
+      if (dup) { setNote({ ok: false, text: `Two shared browsers are called "${dup.name.trim()}"; give each its own name.` }); setSaving(false); return; }
+      const sharedBrowsers = named.map((b) => ({ id: b.id, name: b.name.trim(), allAgents: b.allAgents, agents: b.allAgents ? [] : b.agents, sites: split(b.sites) }));
       const next = { ...config!, computerUrl: String(config!.computerUrl).trim(), sites: list, sharedBrowsers };
       await api(`/api/plugins/${PLUGIN}/config`, { method: "POST", body: JSON.stringify({ companyId, configJson: next }) });
       setConfig(next);
@@ -119,7 +122,7 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
           ))}
         </div>
       </Field>
-      <Field label="Shared browsers" help="A named browser several agents use, one at a time, for example one logged into GoHighLevel. Log it in once from the Computers page; the agents ticked here can use it.">
+      <Field label="Shared browsers" help="Named browsers agents share, one agent at a time, for example one logged into GoHighLevel and one into LinkedIn. Add as many as you need. Log each in once from the Computers page.">
         <div style={{ display: "grid", gap: 12 }}>
           {shared.map((b, i) => {
             const edit = (patch: Partial<typeof b>) => { setNote(null); setShared(shared.map((x, j) => (j === i ? { ...x, ...patch } : x))); };
@@ -130,17 +133,21 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
                   <button style={s.button} onClick={() => { setNote(null); setShared(shared.filter((_, j) => j !== i)); }}>Remove</button>
                 </div>
                 <input style={s.input} value={b.sites} onChange={(e) => edit({ sites: e.target.value })} placeholder="Allowed sites (empty: any)" />
-                <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 14px" }}>
+                <div style={{ display: "flex", gap: 16, fontSize: 13 }}>
+                  <label style={{ display: "flex", gap: 6, alignItems: "center" }}><input type="radio" checked={b.allAgents} onChange={() => edit({ allAgents: true })} />All agents (new agents included)</label>
+                  <label style={{ display: "flex", gap: 6, alignItems: "center" }}><input type="radio" checked={!b.allAgents} onChange={() => edit({ allAgents: false })} />Only the agents I pick</label>
+                </div>
+                {b.allAgents ? null : <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 14px" }}>
                   {agents.map((a) => (
                     <label key={a.id} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13 }}>
                       <input type="checkbox" checked={b.agents.includes(a.id)} onChange={() => edit({ agents: b.agents.includes(a.id) ? b.agents.filter((x) => x !== a.id) : [...b.agents, a.id] })} />{a.name}
                     </label>
                   ))}
-                </div>
+                </div>}
               </div>
             );
           })}
-          <div><button style={s.button} onClick={() => setShared([...shared, { id: `shared-${Math.random().toString(36).slice(2, 10)}`, name: "", agents: [], sites: "" }])}>Add a shared browser</button></div>
+          <div><button style={s.button} onClick={() => setShared([...shared, { id: `shared-${Math.random().toString(36).slice(2, 10)}`, name: "", allAgents: true, agents: [], sites: "" }])}>{shared.length ? "Add another shared browser" : "Add a shared browser"}</button></div>
         </div>
       </Field>
       <div style={s.row}>
