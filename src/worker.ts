@@ -97,6 +97,11 @@ const plugin = definePlugin({
       return { connected: h.startsWith("Connected"), status: h };
     });
     ctx.actions.register("skill", async (params) => ({ key: await ensureSkill(String(params.companyId)) }));
+    // A new version's skill text reaches the companies already set up, without waiting for a settings save.
+    setTimeout(() => {
+      void ctx.state.get(BOOT).then((all) => Promise.all(Object.keys((all as Record<string, unknown> | null) ?? {}).map((id) => ensureSkill(id))))
+        .catch((err) => ctx.logger.warn("could not refresh the Agent computer skill", { err: errText(err) }));
+    }, 15_000);
 
     // The Computers page. Only people: an agent calling these could watch or steer another agent's browser.
     const person = (context: { actor: { type: string } }) => {
