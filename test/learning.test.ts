@@ -51,3 +51,23 @@ test("a shared browser is for every agent unless the board picks some", async ()
   assert.equal(mayUse(picked, "cto"), true);
   assert.equal(mayUse(picked, "ceo"), false);
 });
+
+test("a computer's proxy: its own choice, else the default; none means the host's own connection", async () => {
+  const { proxyChoice } = await import("../src/learning.ts");
+  assert.equal(proxyChoice(undefined, "res"), "res");
+  assert.equal(proxyChoice("default", "res"), "res");
+  assert.equal(proxyChoice("other", "res"), "other");
+  assert.equal(proxyChoice("none", "res"), null);
+  assert.equal(proxyChoice(undefined, undefined), null);
+  assert.equal(proxyChoice(undefined, "none"), null);
+});
+
+test("each computer's proxy goes to the computer with its network policy", async () => {
+  const { Computer } = await import("../src/computer.ts");
+  const bodies: unknown[] = [];
+  const c = new Computer("http://c:4100", "tok", (async (_u: string, init: RequestInit) => { bodies.push(JSON.parse(String(init.body))); return new Response("{}"); }) as typeof fetch,
+    (bot) => (bot === "a" ? "http://u:p@res:7000" : null));
+  await c.egress("a", { mode: "allow_all", rules: [] });
+  await c.egress("b", { mode: "allow_all", rules: [] });
+  assert.deepEqual(bodies.map((b) => (b as { upstream: unknown }).upstream), ["http://u:p@res:7000", null]);
+});

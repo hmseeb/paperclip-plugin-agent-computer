@@ -33,10 +33,10 @@ test("each agent drives its own browser; open sets which sites it may reach firs
   const r = await handle(deps(f.computer, { "a-reply": ["gohighlevel.com"] }), "a-reply", "open", { url: "https://app.gohighlevel.com" });
   assert.equal(r.status, 200);
   assert.deepEqual(f.calls.map((c) => [c.bot, c.method, c.path]), [["a-reply", "PUT", "/egress-policy"], ["a-reply", "POST", "/navigate"]]);
-  assert.deepEqual(f.calls[0].body, { policy: { mode: "allowlist_only", rules: [{ type: "domain", value: "gohighlevel.com" }] } });
+  assert.deepEqual(f.calls[0].body, { policy: { mode: "allowlist_only", rules: [{ type: "domain", value: "gohighlevel.com" }] }, upstream: null });
   assert.equal(f.calls[0].auth, "Bearer tok");
   await handle(deps(f.computer), "a-cto", "open", { url: "https://example.com" });
-  assert.deepEqual(f.calls[2].body, { policy: { mode: "allow_all", rules: [] } });
+  assert.deepEqual(f.calls[2].body, { policy: { mode: "allow_all", rules: [] }, upstream: null });
 });
 
 test("sites from settings are cleaned up", () => {

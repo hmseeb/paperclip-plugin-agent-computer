@@ -1,5 +1,5 @@
 diff --git a/agent-computer/src/egress.ts b/agent-computer/src/egress.ts
-index bd651d3..a5e1d5c 100644
+index bd651d3..fd5b8ad 100644
 --- a/agent-computer/src/egress.ts
 +++ b/agent-computer/src/egress.ts
 @@ -55,6 +55,8 @@ export function egressFor(
@@ -11,7 +11,31 @@ index bd651d3..a5e1d5c 100644
      return {
        server: `http://127.0.0.1:${filter.port}`,
        username: botId,
-@@ -487,7 +489,15 @@ export function needsResolution(policy: EgressPolicy, host: string): boolean {
+@@ -65,10 +67,23 @@ export function egressFor(
+ }
+ 
+ /** The configured upstream proxy for a Bot, ignoring the filter. */
++/**
++ * Upstream proxies pushed at runtime with the network policy (`PUT /egress-policy {upstream}`), per
++ * Bot: a residential proxy for a computer whose host is a datacentre, say. Wins over the environment;
++ * `null` means direct even where the environment names a proxy. Held in memory, re-sent by the caller
++ * with every policy push, and never logged (the URL carries the proxy's password).
++ */
++const runtimeUpstreams = new Map<string, Egress | null>();
++
++export function setEgressUpstream(botId: string, raw: string | null) {
++  runtimeUpstreams.set(botId, raw?.trim() ? splitProxyCredentials(raw) : null);
++}
++
+ export function upstreamFor(
+   botId: string,
+   env: Record<string, string | undefined>,
+ ): Egress | null {
++  if (runtimeUpstreams.has(botId)) return runtimeUpstreams.get(botId) ?? null;
+   const raw = env[egressVariableFor(botId)] ?? env.EGRESS_PROXY_DEFAULT;
+   if (!raw?.trim()) return null;
+   return splitProxyCredentials(raw);
+@@ -487,7 +502,15 @@ export function needsResolution(policy: EgressPolicy, host: string): boolean {
  
  /* --------------------------------- the filter on the computer --------------------------------- */
  
@@ -28,7 +52,7 @@ index bd651d3..a5e1d5c 100644
  let filter: RunningFilter | null = null;
  const policies = new Map<string, EgressPolicy>();
  let policyRequired = true;
-@@ -819,6 +829,7 @@ export async function startEgressFilter(
+@@ -819,6 +842,7 @@ export async function startEgressFilter(
    }
    const secret = randomBytes(24).toString("base64url");
  
@@ -36,7 +60,7 @@ index bd651d3..a5e1d5c 100644
    const server = createServer(async (request, response) => {
      // A plain-HTTP request through a proxy names the absolute URL.
      let target: URL;
-@@ -828,7 +839,7 @@ export async function startEgressFilter(
+@@ -828,7 +852,7 @@ export async function startEgressFilter(
        response.writeHead(400).end("A proxy request names an absolute URL.");
        return;
      }
@@ -45,7 +69,7 @@ index bd651d3..a5e1d5c 100644
        request.headers["proxy-authorization"] as string | undefined,
        secret,
      );
-@@ -854,7 +865,7 @@ export async function startEgressFilter(
+@@ -854,7 +878,7 @@ export async function startEgressFilter(
      async (request: IncomingMessage, client: Socket, head: Buffer) => {
        const [host = "", portText = "443"] = splitHostPort(request.url ?? "");
        const port = Number(portText);
@@ -54,7 +78,7 @@ index bd651d3..a5e1d5c 100644
          request.headers["proxy-authorization"] as string | undefined,
          secret,
        );
-@@ -889,6 +900,9 @@ export async function startEgressFilter(
+@@ -889,6 +913,9 @@ export async function startEgressFilter(
        );
      },
    );
@@ -64,7 +88,7 @@ index bd651d3..a5e1d5c 100644
  
    await new Promise<void>((resolve, reject) => {
      server.once("error", reject);
-@@ -896,7 +910,7 @@ export async function startEgressFilter(
+@@ -896,7 +923,7 @@ export async function startEgressFilter(
    });
    const address = server.address();
    const port = typeof address === "object" && address ? address.port : 0;
@@ -73,7 +97,7 @@ index bd651d3..a5e1d5c 100644
  
    const url = `http://127.0.0.1:${port}`;
    if (options.forShell) shellProxy = url;
-@@ -909,10 +923,35 @@ export async function stopEgressFilter(): Promise<void> {
+@@ -909,10 +936,35 @@ export async function stopEgressFilter(): Promise<void> {
    shellProxy = null;
    policies.clear();
    if (running) {
@@ -109,6 +133,23 @@ index bd651d3..a5e1d5c 100644
  /** `URL.hostname` keeps an IPv6 address's brackets, and a socket given them looks the name up. */
  function unbracketed(hostname: string): string {
    return hostname.replace(/^\[|\]$/g, "");
+@@ -978,10 +1030,16 @@ export async function handleEgressPolicyRequest(
+ ): Promise<Response> {
+   const body = (await request.json().catch(() => null)) as {
+     policy?: unknown;
++    upstream?: unknown;
+   } | null;
+   if (!body || !("policy" in body)) {
+     return Response.json({ error: "Expected { policy }." }, { status: 400 });
+   }
++  if ("upstream" in body) {
++    if (body.upstream !== null && typeof body.upstream !== "string")
++      return Response.json({ error: "upstream is a proxy URL (http://user:pass@host:port) or null." }, { status: 400 });
++    setEgressUpstream(botId, body.upstream as string | null);
++  }
+   if (body.policy === null) {
+     setEgressPolicy(botId, null);
+     return Response.json({ botId, policy: null, filtering: filter !== null });
 diff --git a/agent-computer/src/index.ts b/agent-computer/src/index.ts
 index b6640d1..15e91d6 100644
 --- a/agent-computer/src/index.ts
@@ -303,3 +344,21 @@ index 3aeb838..060d092 100644
      async stop(botId: string): Promise<boolean> {
        return closeOnRequest(botId, "it was stopped");
      },
+diff --git a/agent-computer/tests/runtime-upstream.test.ts b/agent-computer/tests/runtime-upstream.test.ts
+new file mode 100644
+index 0000000..8eb6b8f
+--- /dev/null
++++ b/agent-computer/tests/runtime-upstream.test.ts
+@@ -0,0 +1,12 @@
++import { expect, test } from "bun:test";
++import { setEgressUpstream, upstreamFor } from "../src/egress";
++
++test("a proxy pushed at runtime wins over the environment, and null means direct", () => {
++  const env = { EGRESS_PROXY_DEFAULT: "http://env-proxy:8080" };
++  expect(upstreamFor("bot-a", env)?.server).toBe("http://env-proxy:8080");
++  setEgressUpstream("bot-a", "http://user:p%40ss@res.example:7000");
++  expect(upstreamFor("bot-a", env)).toEqual({ server: "http://res.example:7000", username: "user", password: "p@ss" });
++  setEgressUpstream("bot-a", null);
++  expect(upstreamFor("bot-a", env)).toBeNull();
++  expect(upstreamFor("bot-b", env)?.server).toBe("http://env-proxy:8080");
++});

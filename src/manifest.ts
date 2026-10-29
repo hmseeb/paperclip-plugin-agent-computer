@@ -6,7 +6,7 @@ const route = (routeKey: string, method: "GET" | "POST", path: string) => ({ rou
 const manifest: PaperclipPluginManifestV1 = {
   id: "agent-computer",
   apiVersion: 1,
-  version: "0.3.0",
+  version: "0.4.0",
   displayName: "Agent computer",
   description: "A computer per agent that keeps its logins, plus shared computers. Watch them live on the Computers page, take over for logins and 2FA, type passwords the agent never sees, and teach agents by doing.",
   author: "Haseeb Azhar",
@@ -55,6 +55,13 @@ const manifest: PaperclipPluginManifestV1 = {
       computerUrl: { type: "string", title: "Computer URL", description: "Where Paperclip reaches the agent computer, e.g. http://agent-computer:4100" },
       computerToken: { format: "secret-ref", title: "Computer token", description: "A Paperclip secret holding the computer's COMPUTER_TOKEN." },
       gatewayUrl: { type: "string", title: "Live screen gateway URL", description: "Where the plugin reads recorded steps from the gateway. Default http://agent-computer-gateway:4200" },
+      proxies: {
+        type: "array", title: "Proxies",
+        description: "Named proxies the computers' web traffic can go out through; each URL is kept in a Paperclip secret.",
+        items: { type: "object", properties: { id: { type: "string" }, name: { type: "string" }, url: { format: "secret-ref" } }, required: ["id", "name", "url"] },
+      },
+      defaultProxy: { type: "string", title: "Default proxy", description: "A proxy id, or none." },
+      agentProxies: { type: "object", title: "Proxy per agent", additionalProperties: { type: "string" } },
       sharedComputers: {
         type: "array", title: "Shared computers",
         description: "Named computers agents share, one at a time (e.g. one logged into GoHighLevel).",

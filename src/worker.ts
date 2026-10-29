@@ -3,7 +3,7 @@ import { createHmac } from "node:crypto";
 import { handle, type Target, type HowTo } from "./actions.ts";
 import { addressFor, Computer, egressFor } from "./computer.ts";
 import { HELP } from "./help.ts";
-import { Leases, mayUse, sharedComputers, summarize, type Demonstration, type SharedComputer, type Step } from "./learning.ts";
+import { Leases, mayUse, proxyChoice, sharedComputers, summarize, type Demonstration, type SharedComputer, type Step } from "./learning.ts";
 
 let ctx: PluginContext;
 const errText = (err: unknown) => String((err as Error)?.message ?? err);
@@ -36,9 +36,27 @@ async function start(companyId: string, config: Record<string, unknown>): Promis
   for (const s of Array.isArray(config.sites) ? (config.sites as { agentId?: string; sites?: string[] }[]) : []) {
     if (s?.agentId && Array.isArray(s.sites)) sites.set(s.agentId, s.sites);
   }
+  // Proxies: each a Paperclip secret holding a proxy URL (http://user:pass@host:port), resolved now so
+  // no request waits on it. The URL goes only to the computer, never into logs or answers.
+  const proxies = new Map<string, string>();
+  const list = Array.isArray(config.proxies) ? (config.proxies as { id?: string; url?: unknown }[]) : [];
+  for (const [i, p] of list.entries()) {
+    if (!p?.id || !p.url) continue;
+    // Bound to the plugin by its place in the settings (proxies.0.url), which is what the host checks.
+    const url = await ctx.secrets.resolve(p.url as string, { companyId, configPath: `proxies.${i}.url` })
+      .catch((err) => { ctx.logger.warn("a proxy secret could not be read", { companyId, proxy: p.id, err: errText(err) }); return ""; });
+    if (url) proxies.set(p.id, url);
+  }
+  const agentProxy = (config.agentProxies && typeof config.agentProxies === "object" ? config.agentProxies : {}) as Record<string, string>;
+  const defaultProxy = typeof config.defaultProxy === "string" ? config.defaultProxy : undefined;
+  const shared = sharedComputers(config);
+  const upstream = (bot: string) => {
+    const id = proxyChoice(shared.find((b) => b.id === bot)?.proxy ?? agentProxy[bot], defaultProxy);
+    return id ? proxies.get(id) ?? null : null;
+  };
   const old = tenants.get(companyId);
   const t: Tenant = {
-    computer: new Computer(url, token), token, sites, shared: sharedComputers(config),
+    computer: new Computer(url, token, fetch, upstream), token, sites, shared,
     gatewayUrl: (typeof config.gatewayUrl === "string" && config.gatewayUrl.trim()) || "http://agent-computer-gateway:4200",
     // Leases and takeovers survive a settings save.
     leases: old?.leases ?? new Leases(), takenAt: old?.takenAt ?? new Map(), chrome: old?.chrome ?? new Map(),

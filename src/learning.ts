@@ -54,7 +54,7 @@ export function summarize(steps: Step[]): string[] {
 }
 
 /** `allAgents` (the default): every agent of the company, new ones included; otherwise only `agents`. */
-export interface SharedComputer { id: string; name: string; allAgents: boolean; agents: string[]; sites: string[] }
+export interface SharedComputer { id: string; name: string; allAgents: boolean; agents: string[]; sites: string[]; proxy?: string }
 
 export const mayUse = (b: SharedComputer, agentId: string) => b.allAgents || b.agents.includes(agentId);
 
@@ -94,5 +94,14 @@ export function sharedComputers(config: Record<string, unknown>): SharedComputer
   const list = Array.isArray(saved) ? (saved as Partial<SharedComputer>[]) : [];
   return list
     .filter((b): b is SharedComputer => typeof b?.id === "string" && /^shared-[a-z0-9-]{1,50}$/.test(b.id) && typeof b.name === "string")
-    .map((b) => ({ id: b.id, name: b.name, allAgents: b.allAgents !== false, agents: Array.isArray(b.agents) ? b.agents : [], sites: Array.isArray(b.sites) ? b.sites : [] }));
+    .map((b) => ({ id: b.id, name: b.name, allAgents: b.allAgents !== false, agents: Array.isArray(b.agents) ? b.agents : [], sites: Array.isArray(b.sites) ? b.sites : [], ...(typeof b.proxy === "string" && b.proxy ? { proxy: b.proxy } : {}) }));
+}
+
+/**
+ * Which proxy a computer uses: its own choice (an agent's, or a shared computer's), else the default.
+ * "none" is the host's own connection even when there is a default. Returns a proxy id or null.
+ */
+export function proxyChoice(own: string | undefined, fallback: string | undefined): string | null {
+  const pick = own && own !== "default" ? own : fallback;
+  return pick && pick !== "none" ? pick : null;
 }

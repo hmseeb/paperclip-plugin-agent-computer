@@ -18,11 +18,14 @@ export class Computer {
   private base: string;
   private token: string;
   private fetchImpl: typeof fetch;
+  /** The proxy each computer's traffic goes out through (settings), or null for the host's own connection. */
+  private upstream: (bot: string) => string | null;
 
-  constructor(base: string, token: string, fetchImpl: typeof fetch = fetch) {
+  constructor(base: string, token: string, fetchImpl: typeof fetch = fetch, upstream: (bot: string) => string | null = () => null) {
     this.base = base.replace(/\/+$/, "");
     this.token = token;
     this.fetchImpl = fetchImpl;
+    this.upstream = upstream;
   }
 
   async call<T = Record<string, unknown>>(agentId: string, method: "GET" | "POST" | "PUT", path: string, body?: unknown, timeoutMs = 90_000): Promise<T> {
@@ -39,9 +42,9 @@ export class Computer {
     return json as T;
   }
 
-  /** Which sites this agent's browser may reach; the computer blocks everything until told. */
+  /** Which sites a computer may reach, and through which proxy; the computer blocks everything until told. */
   egress(agentId: string, policy: Egress) {
-    return this.call(agentId, "PUT", "/egress-policy", { policy });
+    return this.call(agentId, "PUT", "/egress-policy", { policy, upstream: this.upstream(agentId) });
   }
 
   health() {

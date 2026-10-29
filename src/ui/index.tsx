@@ -35,13 +35,27 @@ function Field({ label, help, children }: { label: string; help?: ReactNode; chi
 
 const errText = (e: unknown) => String((e as Error)?.message ?? e).slice(0, 300);
 
+/** A proxy choice: the default, the host's own connection, or one of the named proxies. */
+function ProxyPick({ value, onChange, proxies, withDefault = true }: { value: string; onChange: (v: string) => void; proxies: { id: string; name: string }[]; withDefault?: boolean }) {
+  return (
+    <select style={{ ...s.input, width: "auto", minWidth: 150 }} value={value} onChange={(e) => onChange(e.target.value)}>
+      {withDefault ? <option value="default">Default proxy</option> : null}
+      <option value="none">No proxy</option>
+      {proxies.filter((p) => p.name.trim()).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+    </select>
+  );
+}
+
 export function SettingsPage({ context }: PluginSettingsPageProps) {
   const companyId = context.companyId;
   const [config, setConfig] = useState<Config | null>(null);
   const [secrets, setSecrets] = useState<Secret[]>([]);
   const [agents, setAgents] = useState<AgentRow[]>([]);
   const [sites, setSites] = useState<Record<string, string>>({});
-  const [shared, setShared] = useState<{ id: string; name: string; allAgents: boolean; agents: string[]; sites: string }[]>([]);
+  const [proxies, setProxies] = useState<{ id: string; name: string; secretId: string }[]>([]);
+  const [defaultProxy, setDefaultProxy] = useState("none");
+  const [agentProxies, setAgentProxies] = useState<Record<string, string>>({});
+  const [shared, setShared] = useState<{ id: string; name: string; allAgents: boolean; agents: string[]; sites: string; proxy?: string }[]>([]);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [saving, setSaving] = useState(false);
   const setup = usePluginData<{ connected: boolean; status: string }>("setup", { companyId });
@@ -59,7 +73,10 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
       setSecrets(secs.filter((x) => !x.deletedAt && x.status !== "deleted"));
       setAgents(ags.filter((a) => a.status !== "terminated"));
       setShared((Array.isArray(c.sharedComputers ?? c.sharedBrowsers) ? ((c.sharedComputers ?? c.sharedBrowsers) as { id: string; name: string; allAgents?: boolean; agents?: string[]; sites?: string[] }[]) : [])
-        .map((b) => ({ id: b.id, name: b.name, allAgents: b.allAgents !== false, agents: b.agents ?? [], sites: (b.sites ?? []).join(", ") })));
+        .map((b) => ({ id: b.id, name: b.name, allAgents: b.allAgents !== false, agents: b.agents ?? [], sites: (b.sites ?? []).join(", "), proxy: (b as { proxy?: string }).proxy })));
+      setProxies((Array.isArray(c.proxies) ? (c.proxies as { id: string; name?: string; url?: { secretId?: string } }[]) : []).map((x) => ({ id: x.id, name: x.name ?? "", secretId: x.url?.secretId ?? "" })));
+      setDefaultProxy(typeof c.defaultProxy === "string" ? c.defaultProxy : "none");
+      setAgentProxies((c.agentProxies && typeof c.agentProxies === "object" ? c.agentProxies : {}) as Record<string, string>);
       setSites(Object.fromEntries((Array.isArray(c.sites) ? (c.sites as { agentId: string; sites?: string[] }[]) : []).map((x) => [x.agentId, (x.sites ?? []).join(", ")])));
     }).catch((e) => setNote({ ok: false, text: `Could not load the settings: ${errText(e)}` }));
   }, [companyId]);
@@ -79,9 +96,13 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
       const named = shared.filter((b) => b.name.trim());
       const dup = named.find((b, i) => named.findIndex((x) => x.name.trim().toLowerCase() === b.name.trim().toLowerCase()) !== i);
       if (dup) { setNote({ ok: false, text: `Two shared computers are called "${dup.name.trim()}"; give each its own name.` }); setSaving(false); return; }
-      const sharedComputers = named.map((b) => ({ id: b.id, name: b.name.trim(), allAgents: b.allAgents, agents: b.allAgents ? [] : b.agents, sites: split(b.sites) }));
+      const sharedComputers = named.map((b) => ({ id: b.id, name: b.name.trim(), allAgents: b.allAgents, agents: b.allAgents ? [] : b.agents, sites: split(b.sites), ...(b.proxy && b.proxy !== "default" ? { proxy: b.proxy } : {}) }));
+      const usable = proxies.filter((p) => p.name.trim() && p.secretId);
+      if (usable.length < proxies.length) { setNote({ ok: false, text: "Give every proxy a name and a secret, or remove it." }); setSaving(false); return; }
+      const proxyCfg = { proxies: usable.map((p) => ({ id: p.id, name: p.name.trim(), url: { type: "secret_ref", version: "latest", secretId: p.secretId } })),
+        defaultProxy, agentProxies: Object.fromEntries(Object.entries(agentProxies).filter(([, v]) => v && v !== "default")) };
       const { sharedBrowsers: _old, ...rest } = config!;
-      const next = { ...rest, computerUrl: String(config!.computerUrl).trim(), sites: list, sharedComputers };
+      const next = { ...rest, computerUrl: String(config!.computerUrl).trim(), sites: list, sharedComputers, ...proxyCfg };
       await api(`/api/plugins/${PLUGIN}/config`, { method: "POST", body: JSON.stringify({ companyId, configJson: next }) });
       setConfig(next);
       // Every agent gets the skill, alongside its other skills.
@@ -113,12 +134,31 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
           {secrets.map((x) => <option key={x.id} value={x.id}>{x.name || x.key || x.id}</option>)}
         </select>
       </Field>
-      <Field label="Allowed sites" help="Leave an agent empty to let it reach any site. List sites to limit it to them, e.g. gohighlevel.com, *.msgsndr.com.">
+      <Field label="Proxies" help={<>Where the computers' web traffic goes out. With none, it goes out from wherever the computer runs, which for a server in a datacentre is a datacentre address that many sites block or challenge. Add a proxy (a residential one, for example) as a Paperclip secret holding its URL, <code>http://user:password@host:port</code>. Many residential providers rotate the address on every connection; choose a "sticky session" from them so a computer keeps one address and its logins.</>}>
+        <div style={{ display: "grid", gap: 8 }}>
+          {proxies.map((p, i) => (
+            <div key={p.id} style={s.row}>
+              <input style={{ ...s.input, flex: 1 }} value={p.name} placeholder="Name, e.g. US residential" onChange={(e) => { setNote(null); setProxies(proxies.map((x, j) => (j === i ? { ...x, name: e.target.value } : x))); }} />
+              <select style={{ ...s.input, flex: 1 }} value={p.secretId} onChange={(e) => { setNote(null); setProxies(proxies.map((x, j) => (j === i ? { ...x, secretId: e.target.value } : x))); }}>
+                <option value="">Secret with the proxy URL…</option>
+                {secrets.map((x) => <option key={x.id} value={x.id}>{x.name || x.key || x.id}</option>)}
+              </select>
+              <button style={s.button} onClick={() => { setNote(null); setProxies(proxies.filter((_, j) => j !== i)); if (defaultProxy === p.id) setDefaultProxy("none"); }}>Remove</button>
+            </div>
+          ))}
+          <div style={s.row}>
+            <button style={s.button} onClick={() => setProxies([...proxies, { id: `proxy-${Math.random().toString(36).slice(2, 10)}`, name: "", secretId: "" }])}>{proxies.length ? "Add another proxy" : "Add a proxy"}</button>
+            {proxies.length ? <><span style={s.help}>Default for every computer:</span><ProxyPick value={defaultProxy} onChange={(v) => { setNote(null); setDefaultProxy(v); }} proxies={proxies} withDefault={false} /></> : null}
+          </div>
+        </div>
+      </Field>
+      <Field label="Agents' computers" help="Per agent: the sites it may reach (empty: any; or a list such as gohighlevel.com, *.msgsndr.com) and the proxy its traffic goes out through.">
         <div style={{ display: "grid", gap: 8 }}>
           {agents.map((a) => (
-            <div key={a.id} style={{ display: "grid", gridTemplateColumns: "minmax(0,200px) minmax(0,1fr)", gap: 10, alignItems: "center" }}>
+            <div key={a.id} style={{ display: "grid", gridTemplateColumns: proxies.length ? "minmax(0,180px) minmax(0,1fr) auto" : "minmax(0,180px) minmax(0,1fr)", gap: 10, alignItems: "center" }}>
               <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.name}</div>
               <input style={s.input} value={sites[a.id] ?? ""} onChange={(e) => { setNote(null); setSites({ ...sites, [a.id]: e.target.value }); }} placeholder="Any site" />
+              {proxies.length ? <ProxyPick value={agentProxies[a.id] ?? "default"} onChange={(v) => { setNote(null); setAgentProxies({ ...agentProxies, [a.id]: v }); }} proxies={proxies} /> : null}
             </div>
           ))}
         </div>
@@ -133,7 +173,10 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
                   <input style={{ ...s.input, flex: 1 }} value={b.name} onChange={(e) => edit({ name: e.target.value })} placeholder="Name, e.g. GoHighLevel" />
                   <button style={s.button} onClick={() => { setNote(null); setShared(shared.filter((_, j) => j !== i)); }}>Remove</button>
                 </div>
-                <input style={s.input} value={b.sites} onChange={(e) => edit({ sites: e.target.value })} placeholder="Allowed sites (empty: any)" />
+                <div style={s.row}>
+                  <input style={{ ...s.input, flex: 1 }} value={b.sites} onChange={(e) => edit({ sites: e.target.value })} placeholder="Allowed sites (empty: any)" />
+                  {proxies.length ? <ProxyPick value={b.proxy ?? "default"} onChange={(v) => edit({ proxy: v })} proxies={proxies} /> : null}
+                </div>
                 <div style={{ display: "flex", gap: 16, fontSize: 13 }}>
                   <label style={{ display: "flex", gap: 6, alignItems: "center" }}><input type="radio" checked={b.allAgents} onChange={() => edit({ allAgents: true })} />All agents (new agents included)</label>
                   <label style={{ display: "flex", gap: 6, alignItems: "center" }}><input type="radio" checked={!b.allAgents} onChange={() => edit({ allAgents: false })} />Only the agents I pick</label>
