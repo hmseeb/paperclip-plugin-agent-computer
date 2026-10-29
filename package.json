@@ -4,20 +4,44 @@
   "description": "A computer for every Paperclip agent: a real browser that keeps its logins, watched live and taken over from Paperclip, shared computers, proxies, and agents that learn from what people show them.",
   "type": "module",
   "license": "MIT",
-  "paperclipPlugin": { "manifest": "./dist/manifest.js", "worker": "./dist/worker.js", "ui": "./dist/ui/" },
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js",
+    "ui": "./dist/ui/"
+  },
   "scripts": {
     "build": "node build.mjs",
     "test": "node --test test/*.test.ts",
     "prepublishOnly": "node build.mjs && node --test test/*.test.ts"
   },
   "devDependencies": {
-    "esbuild": "^0.27.3"
+    "esbuild": "^0.27.3",
+    "zod": "^4.6.7"
   },
-  "engines": { "node": ">=24.11.0" },
-  "keywords": ["paperclip", "paperclip-plugin", "ai-agents", "browser", "computer-use", "agent-computer"],
+  "engines": {
+    "node": ">=24.11.0"
+  },
+  "keywords": [
+    "paperclip",
+    "paperclip-plugin",
+    "ai-agents",
+    "browser",
+    "computer-use",
+    "agent-computer"
+  ],
   "author": "Haseeb Azhar",
-  "repository": { "type": "git", "url": "git+https://github.com/hmseeb/paperclip-plugin-agent-computer.git" },
-  "bugs": { "url": "https://github.com/hmseeb/paperclip-plugin-agent-computer/issues" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hmseeb/paperclip-plugin-agent-computer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hmseeb/paperclip-plugin-agent-computer/issues"
+  },
   "homepage": "https://github.com/hmseeb/paperclip-plugin-agent-computer#readme",
-  "files": ["dist", "README.md", "LICENSE", "NOTICE"]
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ]
 }
