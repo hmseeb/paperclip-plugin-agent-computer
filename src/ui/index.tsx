@@ -125,7 +125,19 @@ const KEYS = new Set(["Enter", "Backspace", "Tab", "Escape", "Delete", "ArrowUp"
 
 export function ComputersLink({ context }: PluginSidebarProps) {
   if (!context.companyPrefix) return null;
-  return <a href={`/${context.companyPrefix}/computer`} style={{ display: "block", padding: "6px 12px", color: "inherit", textDecoration: "none", fontSize: 14 }}>Computers</a>;
+  const href = `/${context.companyPrefix}/computer`;
+  const active = window.location.pathname.toLowerCase() === href.toLowerCase();
+  // The host's own nav-item classes (SidebarNavItem), so the row matches Tasks, Projects and the rest.
+  return (
+    <a href={href} className={`flex items-center gap-2.5 mx-2 rounded-lg px-2 py-1.5 text-(length:--text-compact) font-medium transition-colors ${active ? "bg-sidebar-accent text-sidebar-accent-foreground" : "text-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"}`}>
+      <span className="relative shrink-0">
+        <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect width="20" height="14" x="2" y="3" rx="2" /><line x1="8" x2="16" y1="21" y2="21" /><line x1="12" x2="12" y1="17" y2="21" />
+        </svg>
+      </span>
+      <span className="min-w-0 flex-1 truncate">Computers</span>
+    </a>
+  );
 }
 
 /** Every agent's browser; ?agent=<id> picks one (the Mattermost Take over button links there). */
