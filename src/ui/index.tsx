@@ -1,5 +1,5 @@
 // The settings page and the agent's Computer tab.
-import { useCallback, useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { LiveScreen } from "./live-screen.tsx";
 import { usePluginAction, usePluginData, type PluginPageProps, type PluginSettingsPageProps, type PluginSidebarProps } from "@paperclipai/plugin-sdk/ui";
 
@@ -190,15 +190,23 @@ export function ComputersPage({ context }: PluginPageProps) {
       if (!live) return;
       const l = r as NonNullable<typeof list>;
       setList(l);
-      setAgentId((cur) => cur ?? l.agents[0]?.id ?? null);
+      setAgentId((cur) => {
+        const id = cur ?? l.agents[0]?.id ?? null;
+        // In the URL even when defaulted, so the corner card knows which computer is on screen.
+        if (id && !cur) { const u = new URL(window.location.href); u.searchParams.set("agent", id); window.history.replaceState(null, "", u); }
+        return id;
+      });
     }).catch(() => undefined);
     void load();
     const timer = setInterval(load, 15_000); // who is using which shared computer
     return () => { live = false; clearInterval(timer); };
   }, [companyId]);
+  // From Mattermost's Take over link: take the waiting request as soon as the computer is on screen, once.
+  const [takeover] = useState(() => new URLSearchParams(window.location.search).get("takeover") === "1");
   const pick = (id: string) => {
     setAgentId(id);
     const u = new URL(window.location.href);
+    u.searchParams.delete("takeover");
     u.searchParams.set("agent", id);
     window.history.replaceState(null, "", u);
   };
@@ -221,7 +229,7 @@ export function ComputersPage({ context }: PluginPageProps) {
         {(list?.agents ?? []).map((a) => item(a.id, a.name))}
       </div>
       {agentId ? <div style={{ display: "grid", gap: 18, alignContent: "start", minWidth: 0 }}>
-        <LiveView key={agentId} companyId={companyId} agentId={agentId} />
+        <LiveView key={agentId} companyId={companyId} agentId={agentId} autoTake={takeover && agentId === new URLSearchParams(window.location.search).get("agent")} />
         {isShared ? null : <HowTos key={`h-${agentId}`} companyId={companyId} agentId={agentId} />}
       </div> : <div style={s.help}>No agents.</div>}
     </div>
@@ -258,7 +266,7 @@ function HowTos({ companyId, agentId }: { companyId: string; agentId: string }) 
 }
 
 /** One agent's browser, live, with take over, hand back, an address bar and passwords. */
-function LiveView({ companyId, agentId }: { companyId: string; agentId: string }) {
+function LiveView({ companyId, agentId, autoTake = false }: { companyId: string; agentId: string; autoTake?: boolean }) {
   const state = usePluginAction("state");
   const control = usePluginAction("control");
   const secret = usePluginAction("secret");
@@ -289,6 +297,16 @@ function LiveView({ companyId, agentId }: { companyId: string; agentId: string }
   }, [refresh]);
 
   const ticket = useCallback(async () => ((await streamTicket({ companyId, agentId })) as { path: string }).path, [companyId, agentId]);
+  const autoTook = useRef(false);
+  useEffect(() => {
+    const c = view?.control;
+    if (!autoTake || autoTook.current || !c) return;
+    autoTook.current = true;
+    const u = new URL(window.location.href);
+    u.searchParams.delete("takeover");
+    window.history.replaceState(null, "", u);
+    if (c.holder !== "human" && c.requested && c.request) void run(() => control({ companyId, agentId, op: "take", requestId: c.request!.id }));
+  }, [view, autoTake]);
   const onProblem = useCallback((p: string | null) => setProblem(p), []);
   const run = async (fn: () => Promise<unknown>, done?: string) => {
     setBusy(true); setFlash(null);
@@ -376,8 +394,10 @@ export function ComputerOverlay({ context }: PluginSidebarProps) {
   const control = usePluginAction("control");
   const streamTicket = usePluginAction("stream-ticket");
   const [att, setAtt] = useState<Attention | null>(null);
-  const [dismissed, setDismissed] = useState<string | null>(null);
-  const [expanded, setExpanded] = useState(false);
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+  const [chosen, setChosen] = useState<string | null>(null);
+  /** The computer open full size. Held on its own: once taken over it is no longer "waiting", but stays open. */
+  const [expanded, setExpanded] = useState<{ bot: string; agentName: string; computer: string | null } | null>(null);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
 
@@ -397,53 +417,71 @@ export function ComputerOverlay({ context }: PluginSidebarProps) {
     return () => { live = false; };
   }, [companyId]);
 
-  const ask = att?.pending[0] ?? null;
-  const target = ask ? { bot: ask.bot, agentName: ask.agentName } : att?.active ?? null;
-  const key = target ? `${target.bot}:${ask?.at ?? "active"}` : null;
+  // Not the computer already on screen in the Computers page, and not ones hidden with ×.
+  const onScreen = /\/computer$/.test(window.location.pathname) ? new URLSearchParams(window.location.search).get("agent") : null;
+  const keyOf = (p: { bot: string; at: number }) => `${p.bot}:${p.at}`;
+  const waiting = (att?.pending ?? []).filter((p) => p.bot !== onScreen && !dismissed.has(keyOf(p)));
+  const ask = waiting.find((p) => p.bot === chosen) ?? waiting[0] ?? null;
+  const others = waiting.filter((p) => p !== ask);
+  const active = att?.active && att.active.bot !== onScreen && !dismissed.has(`${att.active.bot}:active`) ? att.active : null;
+  const target = ask ? { bot: ask.bot, agentName: ask.agentName } : active;
+  const key = ask ? keyOf(ask) : target ? `${target.bot}:active` : null;
   const bot = target?.bot ?? "";
   const ticket = useCallback(async () => ((await streamTicket({ companyId, agentId: bot })) as { path: string }).path, [companyId, bot]);
   const onProblem = useCallback((p: string | null) => setProblem(p), []);
-  if (!companyId || !target || (!expanded && key === dismissed)) return null;
-
-  const takeOver = async () => {
-    setBusy(true);
-    try { await control({ companyId, agentId: bot, op: "take" }); setExpanded(true); } catch (e) { setProblem(errText(e)); } finally { setBusy(false); }
-  };
-  const title = `${target.agentName}${ask?.computer ? ` · shared ${ask.computer} computer` : "'s computer"}`;
-
+  if (!companyId) return null;
   if (expanded) {
     return (
-      <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,.55)", display: "grid", placeItems: "center", padding: 24 }} onClick={(e) => { if (e.target === e.currentTarget) setExpanded(false); }}>
+      <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,.55)", display: "grid", placeItems: "center", padding: 24 }} onClick={(e) => { if (e.target === e.currentTarget) setExpanded(null); }}>
         <div className="bg-background text-foreground" style={{ width: "min(1320px, 96vw)", maxHeight: "94vh", overflow: "auto", borderRadius: 14, padding: 16, boxShadow: "0 20px 60px rgba(0,0,0,.45)" }}>
           <div style={{ ...s.row, marginBottom: 10 }}>
-            <span style={{ fontWeight: 600 }}>{title}</span>
+            <span style={{ fontWeight: 600 }}>{`${expanded.agentName}${expanded.computer ? ` · shared ${expanded.computer} computer` : "'s computer"}`}</span>
             <span style={{ flex: 1 }} />
-            <a href={`/${context.companyPrefix ?? ""}/computer?agent=${bot}`} style={{ ...s.help, color: "inherit" }}>Open in Computers</a>
-            <button style={s.button} onClick={() => setExpanded(false)}>Minimize</button>
+            <a href={`/${context.companyPrefix ?? ""}/computer?agent=${expanded.bot}`} style={{ ...s.help, color: "inherit" }}>Open in Computers</a>
+            <button style={s.button} onClick={() => setExpanded(null)}>Minimize</button>
           </div>
-          <LiveView key={bot} companyId={companyId} agentId={bot} />
+          <LiveView key={expanded.bot} companyId={companyId} agentId={expanded.bot} />
         </div>
       </div>
     );
   }
+  if (!target) return null;
+
+  const takeOver = async () => {
+    setBusy(true);
+    try { await control({ companyId, agentId: bot, op: "take" }); setExpanded({ bot, agentName: target.agentName, computer: ask?.computer ?? null }); } catch (e) { setProblem(errText(e)); } finally { setBusy(false); }
+  };
+  const title = `${target.agentName}${ask?.computer ? ` · shared ${ask.computer} computer` : "'s computer"}`;
 
   return (
     <div className="bg-background text-foreground" style={{ width: 360, borderRadius: 12, overflow: "hidden", border: `1px solid ${ask ? "rgba(242,169,0,.7)" : "rgba(127,127,127,.35)"}`, boxShadow: "0 10px 30px rgba(0,0,0,.35)" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px" }}>
         <span style={{ width: 8, height: 8, borderRadius: 8, flex: "none", background: ask ? "#f2a900" : "#2e9e6a" }} />
         <span style={{ fontWeight: 600, fontSize: 13, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>{title}</span>
-        <button aria-label="Open full size" title="Open full size" style={{ ...s.button, padding: "2px 8px" }} onClick={() => setExpanded(true)}>⤢</button>
-        <button aria-label="Hide" title="Hide" style={{ ...s.button, padding: "2px 8px" }} onClick={() => setDismissed(key)}>×</button>
+        <button aria-label="Open full size" title="Open full size" style={{ ...s.button, padding: "2px 8px" }} onClick={() => setExpanded({ bot, agentName: target.agentName, computer: ask?.computer ?? null })}>⤢</button>
+        <button aria-label="Hide" title="Hide" style={{ ...s.button, padding: "2px 8px" }} onClick={() => { if (key) setDismissed(new Set([...dismissed, key])); setChosen(null); }}>×</button>
       </div>
       {ask ? <div style={{ padding: "0 10px 8px", fontSize: 12.5 }}>{ask.kind === "password" ? `Needs your ${ask.reason.replace(/^needs your /, "")}.` : `Needs you: ${ask.reason}`}</div> : null}
-      <div style={{ cursor: "pointer", background: "rgba(127,127,127,.18)" }} onClick={() => setExpanded(true)} title="Open full size">
+      <div style={{ cursor: "pointer", background: "rgba(127,127,127,.18)" }} onClick={() => setExpanded({ bot, agentName: target.agentName, computer: ask?.computer ?? null })} title="Open full size">
         <LiveScreen ticket={ticket} driving={false} onProblem={onProblem} />
       </div>
       {ask ? (
         <div style={{ display: "flex", gap: 8, padding: 10 }}>
-          <button style={{ ...s.button, ...s.primary, flex: 1 }} disabled={busy} onClick={() => void (ask.kind === "password" ? Promise.resolve(setExpanded(true)) : takeOver())}>{ask.kind === "password" ? "Enter it" : "Take over"}</button>
+          <button style={{ ...s.button, ...s.primary, flex: 1 }} disabled={busy} onClick={() => void (ask.kind === "password" ? Promise.resolve(setExpanded({ bot, agentName: target.agentName, computer: ask?.computer ?? null })) : takeOver())}>{ask.kind === "password" ? "Enter it" : "Take over"}</button>
         </div>
       ) : problem ? <div style={{ ...s.help, padding: "6px 10px" }}>{problem}</div> : null}
+      {others.length ? (
+        <div style={{ borderTop: "1px solid rgba(127,127,127,.3)" }}>
+          <div style={{ ...s.help, padding: "6px 10px 2px" }}>{others.length === 1 ? "Also waiting for you:" : `${others.length} more waiting for you:`}</div>
+          {others.map((p) => (
+            <button key={keyOf(p)} onClick={() => setChosen(p.bot)} title="Show this one"
+              style={{ display: "flex", gap: 8, alignItems: "center", width: "100%", padding: "6px 10px", border: "none", background: "transparent", color: "inherit", font: "inherit", fontSize: 12.5, textAlign: "left", cursor: "pointer" }}>
+              <span style={{ width: 7, height: 7, borderRadius: 7, flex: "none", background: "#f2a900" }} />
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}><b>{p.agentName}</b>{p.computer ? ` (shared ${p.computer})` : ""}: {p.kind === "password" ? p.reason : p.reason}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

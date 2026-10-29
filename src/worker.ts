@@ -307,7 +307,7 @@ const plugin = definePlugin({
         const agent = await ctx.agents.get(id, companyId).catch(() => null);
         const company = await ctx.companies.get(companyId).catch(() => null);
         // The Mattermost plugin listens for this and posts a Take over link: its Paperclip URL + `path`.
-        const path = company?.issuePrefix ? `/${company.issuePrefix}/computer?agent=${b.bot}` : null;
+        const path = company?.issuePrefix ? `/${company.issuePrefix}/computer?agent=${b.bot}&takeover=1` : null; // opens already taken over
         t.pending.set(b.bot, { agentId: id, agentName: agent?.name ?? "An agent", computer: b.shared ? b.label : null, kind, reason, at: Date.now() });
         await ctx.events.emit("needs-person", companyId, { agentId: id, agentName: agent?.name ?? null, computer: b.shared ? b.label : null, kind, reason, url, path })
           .catch((err) => ctx.logger.warn("could not announce a help request", { err: errText(err) }));
