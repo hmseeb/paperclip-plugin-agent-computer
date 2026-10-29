@@ -24,4 +24,5 @@ jobs:
           git -C /tmp/openbot checkout -q "$(cat computer/OPENBOT_REF)"
           git -C /tmp/openbot apply "$PWD/computer/human-browser.patch"
           cd /tmp/openbot && bun install --frozen-lockfile >/dev/null
-          cd agent-computer && bunx tsc --noEmit -p . && bun test tests/runtime-upstream.test.ts tests/live-page.test.ts 2>&1 | tail -3
+          cd agent-computer && bun install --frozen-lockfile >/dev/null
+          bunx tsc --noEmit -p . && bun test tests/runtime-upstream.test.ts tests/live-page.test.ts
