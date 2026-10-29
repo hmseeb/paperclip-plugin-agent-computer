@@ -10,6 +10,9 @@ chrome a person driving it needs:
 - A tab the person switches to stays the live one until it closes or the site opens a new window.
 - Each browser gets its own egress-filter port instead of proxy credentials: with credentials,
   Chromium stalled on Google (search never loaded); the port identifies the agent instead.
+- No passkeys (WebAuthn reports unsupported in every page and popup). A passkey prompt is Chromium's
+  own window, which never reaches the live screen, so "Sign in with Google" sat on "Verifying it's
+  you…" with nothing to click. Sites fall back to password and codes, which happen in the page.
 - `SCREENCAST_QUALITY` sets the live screen's JPEG quality (Greg's mini: 40).
 
 On Greg's mini the source and patch live in `~/paperclip/agent-computer/`, and `compose.yml` runs the

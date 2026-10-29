@@ -189,7 +189,7 @@ index b6640d1..15e91d6 100644
        // person addresses them by pointing, because they are looking at a picture. Different problem,
        // different endpoint, and only usable while they hold the wheel.
 diff --git a/agent-computer/src/profiles.ts b/agent-computer/src/profiles.ts
-index 3aeb838..f817d9d 100644
+index 3aeb838..060d092 100644
 --- a/agent-computer/src/profiles.ts
 +++ b/agent-computer/src/profiles.ts
 @@ -39,7 +39,7 @@ import { type BrowserContext, chromium, type Page } from "playwright";
@@ -218,7 +218,31 @@ index 3aeb838..f817d9d 100644
          const proxy = egressFor(botId, process.env);
          const context = await chromium.launchPersistentContext(dir, {
            channel: BROWSER_RUNTIME.channel,
-@@ -536,7 +539,11 @@ export function createProfiles(root: string, onClosed: BrowserClosed) {
+@@ -527,6 +530,23 @@ export function createProfiles(root: string, onClosed: BrowserClosed) {
+           await attachBrowserNetwork(context, network);
+           await attachPageNetwork(context, page, network);
+         }
++        /*
++         * No passkeys. A site that offers one (Google's "Verifying it's you… use your passkey") makes
++         * Chromium draw its own passkey sheet, which is browser UI rather than page: it never reaches
++         * the live screen, so a person sees a stuck page with nothing to click, and the passkey is on
++         * their own phone or laptop anyway. Without WebAuthn the site offers its password and code
++         * steps instead, which happen in the page. Every page and popup, before any script runs.
++         */
++        await context.addInitScript(() => {
++          const unsupported = () => Promise.reject(new DOMException("Passkeys are not available in this browser.", "NotSupportedError"));
++          try { Object.defineProperty(window, "PublicKeyCredential", { value: undefined, configurable: true }); } catch {}
++          const creds = navigator.credentials as (CredentialsContainer & Record<string, unknown>) | undefined;
++          if (creds) {
++            const get = creds.get.bind(creds), create = creds.create.bind(creds);
++            creds.get = (o?: CredentialRequestOptions) => (o && "publicKey" in o ? unsupported() : get(o)) as Promise<Credential | null>;
++            creds.create = (o?: CredentialCreationOptions) => (o && "publicKey" in o ? unsupported() : create(o)) as Promise<Credential | null>;
++          }
++        }).catch(() => undefined);
+         const record: LiveBrowser = {
+           context,
+           page,
+@@ -536,7 +556,11 @@ export function createProfiles(root: string, onClosed: BrowserClosed) {
            ...(sessionCookies ? { sessionCookies } : {}),
          };
          record.retarget = () => {
@@ -231,7 +255,7 @@ index 3aeb838..f817d9d 100644
            if (!next || next === record.page) return;
            record.page = next;
            console.info(
-@@ -551,6 +558,7 @@ export function createProfiles(root: string, onClosed: BrowserClosed) {
+@@ -551,6 +575,7 @@ export function createProfiles(root: string, onClosed: BrowserClosed) {
          // in a new window is neither shown to the person taking the wheel nor reachable by input.
          context.on("page", (opened) => {
            if (!LOCAL_CHROME) void attachPageNetwork(context, opened, network);
@@ -239,7 +263,7 @@ index 3aeb838..f817d9d 100644
            record.retarget();
            // A popup closes itself when it succeeds, and the record must move back to the opener
            // rather than leave a closed page to be read as a dead browser.
-@@ -582,6 +590,39 @@ export function createProfiles(root: string, onClosed: BrowserClosed) {
+@@ -582,6 +607,39 @@ export function createProfiles(root: string, onClosed: BrowserClosed) {
       * repeating it: a request is one more reason a browser closes, not a different kind of closing,
       * and anything watching has to come down either way.
       */
