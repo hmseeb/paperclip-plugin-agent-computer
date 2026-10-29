@@ -1,9 +1,9 @@
 import { definePlugin, runWorker, type PluginContext } from "@paperclipai/plugin-sdk";
 import { createHmac } from "node:crypto";
-import { handle, type Browser, type HowTo } from "./actions.ts";
+import { handle, type Target, type HowTo } from "./actions.ts";
 import { addressFor, Computer, egressFor } from "./computer.ts";
 import { HELP } from "./help.ts";
-import { Leases, mayUse, sharedBrowsers, summarize, type Demonstration, type SharedBrowser, type Step } from "./learning.ts";
+import { Leases, mayUse, sharedComputers, summarize, type Demonstration, type SharedComputer, type Step } from "./learning.ts";
 
 let ctx: PluginContext;
 const errText = (err: unknown) => String((err as Error)?.message ?? err);
@@ -16,7 +16,7 @@ interface Tenant {
   token: string;
   gatewayUrl: string;
   sites: Map<string, string[]>;
-  shared: SharedBrowser[];
+  shared: SharedComputer[];
   leases: Leases;
   ticketKey: Buffer;
   /** When a person took each browser, and what they did with the browser chrome since. */
@@ -35,7 +35,7 @@ async function start(companyId: string, config: Record<string, unknown>): Promis
   }
   const old = tenants.get(companyId);
   const t: Tenant = {
-    computer: new Computer(url, token), token, sites, shared: sharedBrowsers(config),
+    computer: new Computer(url, token), token, sites, shared: sharedComputers(config),
     gatewayUrl: (typeof config.gatewayUrl === "string" && config.gatewayUrl.trim()) || "http://agent-computer-gateway:4200",
     // Leases and takeovers survive a settings save.
     leases: old?.leases ?? new Leases(), takenAt: old?.takenAt ?? new Map(), chrome: old?.chrome ?? new Map(),
@@ -111,10 +111,10 @@ const plugin = definePlugin({
       const shared = t.shared.find((b) => b.id === id);
       if (shared) return { t, bot: shared.id, sites: shared.sites, companyId };
       const agent = id ? await ctx.agents.get(id, companyId) : null;
-      if (!agent) throw new Error("No such agent or shared browser in this company.");
+      if (!agent) throw new Error("No such agent or shared computer in this company.");
       return { t, bot: agent.id, sites: t.sites.get(agent.id) ?? [], companyId };
     };
-    ctx.actions.register("browsers", async (params, context) => {
+    ctx.actions.register("computers", async (params, context) => {
       person(context);
       const companyId = String(params.companyId ?? "");
       const t = await tenant(companyId);
@@ -248,16 +248,16 @@ const plugin = definePlugin({
     const body = input.body && typeof input.body === "object" && !Array.isArray(input.body) ? (input.body as Record<string, unknown>) : {};
     const res = await handle({
       computer: t.computer,
-      async browser(id, name) {
-        if (!name) return { bot: id, label: "your browser", sites: t.sites.get(id) ?? [], shared: false };
+      async pick(id, name) {
+        if (!name) return { bot: id, label: "your computer", sites: t.sites.get(id) ?? [], shared: false };
         const b = findShared(t, name);
-        if (!b) return { status: 404, error: `There is no shared browser "${name}". /pc/browsers lists yours.` };
-        if (!mayUse(b, id)) return { status: 403, error: `You are not assigned the shared browser "${b.name}"; the board assigns them in the plugin settings.` };
+        if (!b) return { status: 404, error: `There is no shared computer "${name}". /pc/computers lists yours.` };
+        if (!mayUse(b, id)) return { status: 403, error: `You may not use the shared computer "${b.name}"; the board decides in the plugin settings.` };
         const lease = t.leases.take(b.id, id);
         if (!lease.ok) return { status: 409, error: `"${b.name}" is in use by ${await nameOf(lease.holder)}. Try again in a few minutes; it frees up 10 minutes after their last use.` };
         return { bot: b.id, label: b.name, sites: b.sites, shared: true };
       },
-      async browsers(id) {
+      async computers(id) {
         return [{ name: "your own", shared: false, inUseBy: null },
           ...await Promise.all(t.shared.filter((b) => mayUse(b, id)).map(async (b) => ({ name: b.name, shared: true, inUseBy: await nameOf(t.leases.holder(b.id)) })))];
       },
@@ -265,12 +265,12 @@ const plugin = definePlugin({
         const b = findShared(t, name);
         return Boolean(b && t.leases.release(b.id, id));
       },
-      needsPerson: async (id, b: Browser, kind, reason, url) => {
+      needsPerson: async (id, b: Target, kind, reason, url) => {
         const agent = await ctx.agents.get(id, companyId).catch(() => null);
         const company = await ctx.companies.get(companyId).catch(() => null);
         // The Mattermost plugin listens for this and posts a Take over link: its Paperclip URL + `path`.
         const path = company?.issuePrefix ? `/${company.issuePrefix}/computer?agent=${b.bot}` : null;
-        await ctx.events.emit("needs-person", companyId, { agentId: id, agentName: agent?.name ?? null, browser: b.shared ? b.label : null, kind, reason, url, path })
+        await ctx.events.emit("needs-person", companyId, { agentId: id, agentName: agent?.name ?? null, computer: b.shared ? b.label : null, kind, reason, url, path })
           .catch((err) => ctx.logger.warn("could not announce a help request", { err: errText(err) }));
       },
       async takeDemonstration(bot, id) {

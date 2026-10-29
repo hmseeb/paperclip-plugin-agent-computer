@@ -58,7 +58,7 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
       setConfig({ computerUrl: "http://agent-computer:4100", ...c });
       setSecrets(secs.filter((x) => !x.deletedAt && x.status !== "deleted"));
       setAgents(ags.filter((a) => a.status !== "terminated"));
-      setShared((Array.isArray(c.sharedBrowsers) ? (c.sharedBrowsers as { id: string; name: string; allAgents?: boolean; agents?: string[]; sites?: string[] }[]) : [])
+      setShared((Array.isArray(c.sharedComputers ?? c.sharedBrowsers) ? ((c.sharedComputers ?? c.sharedBrowsers) as { id: string; name: string; allAgents?: boolean; agents?: string[]; sites?: string[] }[]) : [])
         .map((b) => ({ id: b.id, name: b.name, allAgents: b.allAgents !== false, agents: b.agents ?? [], sites: (b.sites ?? []).join(", ") })));
       setSites(Object.fromEntries((Array.isArray(c.sites) ? (c.sites as { agentId: string; sites?: string[] }[]) : []).map((x) => [x.agentId, (x.sites ?? []).join(", ")])));
     }).catch((e) => setNote({ ok: false, text: `Could not load the settings: ${errText(e)}` }));
@@ -78,9 +78,10 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
       const split = (v: string) => v.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
       const named = shared.filter((b) => b.name.trim());
       const dup = named.find((b, i) => named.findIndex((x) => x.name.trim().toLowerCase() === b.name.trim().toLowerCase()) !== i);
-      if (dup) { setNote({ ok: false, text: `Two shared browsers are called "${dup.name.trim()}"; give each its own name.` }); setSaving(false); return; }
-      const sharedBrowsers = named.map((b) => ({ id: b.id, name: b.name.trim(), allAgents: b.allAgents, agents: b.allAgents ? [] : b.agents, sites: split(b.sites) }));
-      const next = { ...config!, computerUrl: String(config!.computerUrl).trim(), sites: list, sharedBrowsers };
+      if (dup) { setNote({ ok: false, text: `Two shared computers are called "${dup.name.trim()}"; give each its own name.` }); setSaving(false); return; }
+      const sharedComputers = named.map((b) => ({ id: b.id, name: b.name.trim(), allAgents: b.allAgents, agents: b.allAgents ? [] : b.agents, sites: split(b.sites) }));
+      const { sharedBrowsers: _old, ...rest } = config!;
+      const next = { ...rest, computerUrl: String(config!.computerUrl).trim(), sites: list, sharedComputers };
       await api(`/api/plugins/${PLUGIN}/config`, { method: "POST", body: JSON.stringify({ companyId, configJson: next }) });
       setConfig(next);
       // Every agent gets the skill, alongside its other skills.
@@ -122,7 +123,7 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
           ))}
         </div>
       </Field>
-      <Field label="Shared browsers" help="Named browsers agents share, one agent at a time, for example one logged into GoHighLevel and one into LinkedIn. Add as many as you need. Log each in once from the Computers page.">
+      <Field label="Shared computers" help="Named computers agents share, one agent at a time, for example one logged into GoHighLevel and one into LinkedIn. Add as many as you need. Log each in once from the Computers page.">
         <div style={{ display: "grid", gap: 12 }}>
           {shared.map((b, i) => {
             const edit = (patch: Partial<typeof b>) => { setNote(null); setShared(shared.map((x, j) => (j === i ? { ...x, ...patch } : x))); };
@@ -147,7 +148,7 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
               </div>
             );
           })}
-          <div><button style={s.button} onClick={() => setShared([...shared, { id: `shared-${Math.random().toString(36).slice(2, 10)}`, name: "", allAgents: true, agents: [], sites: "" }])}>{shared.length ? "Add another shared browser" : "Add a shared browser"}</button></div>
+          <div><button style={s.button} onClick={() => setShared([...shared, { id: `shared-${Math.random().toString(36).slice(2, 10)}`, name: "", allAgents: true, agents: [], sites: "" }])}>{shared.length ? "Add another shared computer" : "Add a shared computer"}</button></div>
         </div>
       </Field>
       <div style={s.row}>
@@ -179,20 +180,20 @@ export function ComputersLink({ context }: PluginSidebarProps) {
 /** Every agent's browser; ?agent=<id> picks one (the Mattermost Take over button links there). */
 export function ComputersPage({ context }: PluginPageProps) {
   const companyId = context.companyId;
-  const browsers = usePluginAction("browsers");
+  const browsers = usePluginAction("computers");
   const [list, setList] = useState<{ agents: { id: string; name: string }[]; shared: { id: string; name: string; inUseBy: string | null }[] } | null>(null);
   const [agentId, setAgentId] = useState<string | null>(() => new URLSearchParams(window.location.search).get("agent"));
   useEffect(() => {
     if (!companyId) return;
     let live = true;
-    const load = () => browsers({ companyId }).then((r) => {
+    const load = () => computers({ companyId }).then((r) => {
       if (!live) return;
       const l = r as NonNullable<typeof list>;
       setList(l);
       setAgentId((cur) => cur ?? l.agents[0]?.id ?? null);
     }).catch(() => undefined);
     void load();
-    const timer = setInterval(load, 15_000); // who is using which shared browser
+    const timer = setInterval(load, 15_000); // who is using which shared computer
     return () => { live = false; clearInterval(timer); };
   }, [companyId]);
   const pick = (id: string) => {
@@ -212,7 +213,7 @@ export function ComputersPage({ context }: PluginPageProps) {
     <div style={{ display: "grid", gridTemplateColumns: "minmax(0,220px) minmax(0,1fr)", gap: 20, padding: 16 }}>
       <div style={{ display: "grid", gap: 4, alignContent: "start" }}>
         {list?.shared.length ? <>
-          <div style={{ ...s.label, marginBottom: 6 }}>Shared browsers</div>
+          <div style={{ ...s.label, marginBottom: 6 }}>Shared computers</div>
           {list.shared.map((b) => item(b.id, b.name, b.inUseBy ? `in use by ${b.inUseBy}` : "free"))}
           <div style={{ height: 12 }} />
         </> : null}
@@ -328,7 +329,7 @@ function LiveView({ companyId, agentId }: { companyId: string; agentId: string }
           <button aria-label="Back" title="Back" style={chrome} disabled={busy} onClick={() => run(() => history({ companyId, agentId, action: "back" }))}>←</button>
           <button aria-label="Forward" title="Forward" style={chrome} disabled={busy} onClick={() => run(() => history({ companyId, agentId, action: "forward" }))}>→</button>
           <button aria-label="Reload" title="Reload" style={chrome} disabled={busy} onClick={() => run(() => history({ companyId, agentId, action: "reload" }))}>↻</button>
-          <span title={mine ? "You have the browser" : "The agent has the browser"} style={{ width: 9, height: 9, borderRadius: 9, flex: "none", background: mine ? "#2f6fed" : problem ? "#d24b4e" : "#2e9e6a" }} />
+          <span title={mine ? "You have the computer" : "The agent has the computer"} style={{ width: 9, height: 9, borderRadius: 9, flex: "none", background: mine ? "#2f6fed" : problem ? "#d24b4e" : "#2e9e6a" }} />
           <form style={{ flex: 1, minWidth: 0, display: "flex" }} onSubmit={(e) => { e.preventDefault(); const u = (address ?? "").trim(); if (u) void run(async () => { await goto({ companyId, agentId, url: u }); setAddress(null); }); }}>
             <input style={{ ...s.input, padding: "6px 12px", borderRadius: 999, background: "rgba(127,127,127,.08)" }} value={address ?? url}
               onFocus={(e) => { setAddress(e.target.value); e.target.select(); }} onBlur={() => setTimeout(() => setAddress(null), 300)}
@@ -353,8 +354,8 @@ function LiveView({ companyId, agentId }: { companyId: string; agentId: string }
       <div style={{ ...s.help, minHeight: 18 }}>
         {problem ? <span style={s.bad}>{problem}</span>
           : flash ? <span style={flash === "Entered." ? s.ok : s.bad}>{flash}</span>
-          : mine ? "You have the browser: click, type, scroll, drag, use shortcuts and paste. The agent waits until you hand it back."
-          : view?.title ? `${view.title} · the agent has the browser. Take over to use it yourself.` : "The agent has the browser. Take over to use it yourself."}
+          : mine ? "You have the computer: click, type, scroll, drag, use shortcuts and paste. The agent waits until you hand it back."
+          : view?.title ? `${view.title} · the agent has the computer. Take over to use it yourself.` : "The agent has the computer. Take over to use it yourself."}
       </div>
     </div>
   );

@@ -54,9 +54,9 @@ export function summarize(steps: Step[]): string[] {
 }
 
 /** `allAgents` (the default): every agent of the company, new ones included; otherwise only `agents`. */
-export interface SharedBrowser { id: string; name: string; allAgents: boolean; agents: string[]; sites: string[] }
+export interface SharedComputer { id: string; name: string; allAgents: boolean; agents: string[]; sites: string[] }
 
-export const mayUse = (b: SharedBrowser, agentId: string) => b.allAgents || b.agents.includes(agentId);
+export const mayUse = (b: SharedComputer, agentId: string) => b.allAgents || b.agents.includes(agentId);
 
 /** Which browser a call uses: the agent's own, or a shared one it is allowed, leased to one agent at a time. */
 export class Leases {
@@ -69,29 +69,30 @@ export class Leases {
   }
 
   /** Takes or renews the lease; returns who holds it when someone else does. */
-  take(browserId: string, agentId: string): { ok: true } | { ok: false; holder: string } {
-    const h = this.held.get(browserId);
+  take(computerId: string, agentId: string): { ok: true } | { ok: false; holder: string } {
+    const h = this.held.get(computerId);
     if (h && h.agentId !== agentId && h.until > this.now()) return { ok: false, holder: h.agentId };
-    this.held.set(browserId, { agentId, until: this.now() + this.ttlMs });
+    this.held.set(computerId, { agentId, until: this.now() + this.ttlMs });
     return { ok: true };
   }
 
-  release(browserId: string, agentId: string): boolean {
-    const h = this.held.get(browserId);
+  release(computerId: string, agentId: string): boolean {
+    const h = this.held.get(computerId);
     if (!h || h.agentId !== agentId) return false;
-    this.held.delete(browserId);
+    this.held.delete(computerId);
     return true;
   }
 
-  holder(browserId: string): string | null {
-    const h = this.held.get(browserId);
+  holder(computerId: string): string | null {
+    const h = this.held.get(computerId);
     return h && h.until > this.now() ? h.agentId : null;
   }
 }
 
-export function sharedBrowsers(config: Record<string, unknown>): SharedBrowser[] {
-  const list = Array.isArray(config.sharedBrowsers) ? (config.sharedBrowsers as Partial<SharedBrowser>[]) : [];
+export function sharedComputers(config: Record<string, unknown>): SharedComputer[] {
+  const saved = config.sharedComputers ?? config.sharedBrowsers; // the setting's name before the rename
+  const list = Array.isArray(saved) ? (saved as Partial<SharedComputer>[]) : [];
   return list
-    .filter((b): b is SharedBrowser => typeof b?.id === "string" && /^shared-[a-z0-9-]{1,50}$/.test(b.id) && typeof b.name === "string")
+    .filter((b): b is SharedComputer => typeof b?.id === "string" && /^shared-[a-z0-9-]{1,50}$/.test(b.id) && typeof b.name === "string")
     .map((b) => ({ id: b.id, name: b.name, allAgents: b.allAgents !== false, agents: Array.isArray(b.agents) ? b.agents : [], sites: Array.isArray(b.sites) ? b.sites : [] }));
 }

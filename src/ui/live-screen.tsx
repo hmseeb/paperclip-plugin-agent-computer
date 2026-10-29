@@ -219,7 +219,7 @@ export function LiveScreen({ ticket, driving, onProblem }: Props) {
       // At most its real size, centred: a popup (a 500px sign-in window) shows as a window, not stretched.
       style={{ display: "block", width: "100%", maxWidth: frameWidth, height: "auto", margin: "0 auto", background: "#fff", cursor: driving ? "default" : "not-allowed" }}
       {...(driving ? { onMouseDown: onMouse("pressed"), onMouseUp: onMouse("released"), onMouseMove: onMouse("moved"), onContextMenu: (e: React.MouseEvent) => e.preventDefault() } : {})}
-      aria-label={driving ? "The agent's browser. You have control: click and type here." : "The agent's browser, live"}
+      aria-label={driving ? "The agent's computer. You have control: click and type here." : "The agent's computer, live"}
     />
   );
 }

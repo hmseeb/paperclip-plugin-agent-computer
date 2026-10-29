@@ -8,7 +8,7 @@ const manifest: PaperclipPluginManifestV1 = {
   apiVersion: 1,
   version: "0.2.0",
   displayName: "Agent computer",
-  description: "A browser per agent that keeps its logins. Watch it live from the Computers page, take over for logins and 2FA, and type passwords the agent never sees.",
+  description: "A computer per agent that keeps its logins, plus shared computers. Watch them live on the Computers page, take over for logins and 2FA, type passwords the agent never sees, and teach agents by doing.",
   author: "Haseeb Azhar",
   categories: ["connector"],
   capabilities: [
@@ -30,14 +30,14 @@ const manifest: PaperclipPluginManifestV1 = {
     route("ask-for-help", "POST", "/pc/ask-for-help"),
     route("ask-for-password", "POST", "/pc/ask-for-password"),
     route("wait", "GET", "/pc/wait"),
-    route("browsers", "GET", "/pc/browsers"),
+    route("computers", "GET", "/pc/computers"),
     route("release", "POST", "/pc/release"),
     route("howtos", "GET", "/pc/howtos"),
     route("save-howto", "POST", "/pc/howtos"),
     route("forget-howto", "POST", "/pc/howtos/forget"),
     route("teach", "POST", "/pc/howtos/teach"),
   ],
-  skills: [{ skillKey: "computer", displayName: "Agent computer", slug: "agent-computer", description: "Use a real browser that keeps your logins, and hand it to a person when needed.", markdown: SKILL }],
+  skills: [{ skillKey: "computer", displayName: "Agent computer", slug: "agent-computer", description: "Use your own computer on the web, keep your logins, hand it to a person when needed, and learn from what they do.", markdown: SKILL }],
   ui: {
     slots: [
       { type: "settingsPage", id: "computer-settings", displayName: "Agent computer", exportName: "SettingsPage" },
@@ -53,9 +53,9 @@ const manifest: PaperclipPluginManifestV1 = {
       computerUrl: { type: "string", title: "Computer URL", description: "Where Paperclip reaches the agent computer, e.g. http://agent-computer:4100" },
       computerToken: { format: "secret-ref", title: "Computer token", description: "A Paperclip secret holding the computer's COMPUTER_TOKEN." },
       gatewayUrl: { type: "string", title: "Live screen gateway URL", description: "Where the plugin reads recorded steps from the gateway. Default http://agent-computer-gateway:4200" },
-      sharedBrowsers: {
-        type: "array", title: "Shared browsers",
-        description: "Named browsers several agents use, one at a time (e.g. one logged into GoHighLevel).",
+      sharedComputers: {
+        type: "array", title: "Shared computers",
+        description: "Named computers agents share, one at a time (e.g. one logged into GoHighLevel).",
         items: { type: "object", properties: { id: { type: "string" }, name: { type: "string" }, allAgents: { type: "boolean", default: true }, agents: { type: "array", items: { type: "string" } }, sites: { type: "array", items: { type: "string" } } }, required: ["id", "name"] },
       },
       sites: {

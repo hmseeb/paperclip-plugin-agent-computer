@@ -19,8 +19,8 @@ function fake(answer: (path: string, body: unknown) => [number, unknown] = () =>
 
 const deps = (computer: Computer, sites: Record<string, string[]> = {}, asked: unknown[] = []) => ({
   computer,
-  browser: async (id: string, name: string) => (name ? { status: 403, error: "not assigned" } : { bot: id, label: "your browser", sites: sites[id] ?? [], shared: false }),
-  browsers: async () => [],
+  pick: async (id: string, name: string) => (name ? { status: 403, error: "not assigned" } : { bot: id, label: "your browser", sites: sites[id] ?? [], shared: false }),
+  computers: async () => [],
   release: async () => false,
   needsPerson: async (id: string, b: { bot: string }, kind: string, reason: string, url: string | null) => { asked.push([id, kind, reason, url]); },
   takeDemonstration: async () => null,
@@ -106,7 +106,7 @@ test("wait returns when the person hands back, with what they did, shown once", 
 
 test("a shared browser the agent is not assigned is refused before the computer is touched", async () => {
   const f = fake();
-  const r = await handle(deps(f.computer), "a", "open", { url: "https://x.com", browser: "GoHighLevel" });
+  const r = await handle(deps(f.computer), "a", "open", { url: "https://x.com", computer: "GoHighLevel" });
   assert.equal(r.status, 403);
   assert.equal(f.calls.length, 0);
 });

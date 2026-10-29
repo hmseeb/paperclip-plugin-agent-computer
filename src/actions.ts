@@ -1,22 +1,22 @@
 // What an agent does with its computer, as plugin API routes only agents can call. Paperclip
 // checks which agent is calling. A call drives the agent's own browser, or a shared one the board
-// assigned to it (`browser`), leased to one agent at a time. Browser only: the computer's shell and
+// assigned to it (`computer`), leased to one agent at a time. The web only: the computer's shell and
 // files are not exposed.
 import { ComputerError, egressFor, type Computer } from "./computer.ts";
 import type { Demonstration } from "./learning.ts";
 
 /** A browser a call runs in: `bot` is the computer's id for it. */
-export interface Browser { bot: string; label: string; sites: string[]; shared: boolean }
+export interface Target { bot: string; label: string; sites: string[]; shared: boolean }
 export interface HowTo { name: string; site?: string; steps: string; notes?: string; updatedAt: string; learnedFrom?: string }
 
 export interface ActionDeps {
   computer: Computer;
   /** The browser for this call, or the reason it is refused (not assigned, in use by another agent). */
-  browser(agentId: string, name: string): Promise<Browser | { status: number; error: string }>;
-  browsers(agentId: string): Promise<{ name: string; shared: boolean; inUseBy: string | null }[]>;
+  pick(agentId: string, name: string): Promise<Target | { status: number; error: string }>;
+  computers(agentId: string): Promise<{ name: string; shared: boolean; inUseBy: string | null }[]>;
   release(agentId: string, name: string): Promise<boolean>;
   /** Tells people the agent needs them (the Mattermost plugin posts a Take over link). */
-  needsPerson(agentId: string, b: Browser, kind: "help" | "password", reason: string, url: string | null): Promise<void>;
+  needsPerson(agentId: string, b: Target, kind: "help" | "password", reason: string, url: string | null): Promise<void>;
   /** The latest demonstration in this browser the agent has not been shown yet; marks it shown. */
   takeDemonstration(bot: string, agentId: string): Promise<Demonstration | null>;
   howtos: {
@@ -32,6 +32,8 @@ export interface ActionDeps {
 type Result = { status: number; body: unknown };
 const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
 const num = (v: unknown) => (typeof v === "number" ? v : typeof v === "string" && v.trim() ? Number(v) : undefined);
+/** Which shared computer a call names (`computer`; `browser` from before the rename still works). */
+const which = (input: Record<string, unknown>) => str(input.computer) || str(input.browser);
 const ok = (body: unknown): Result => ({ status: 200, body });
 const bad = (status: number, error: string): Result => ({ status, body: { error } });
 const WAIT_MS = 20_000; // under the host's 30 s limit for one call
@@ -42,7 +44,7 @@ const settled = (c: Control) => c.holder === "bot" && !c.requested && !c.secretW
 export async function handle(d: ActionDeps, agentId: string, routeKey: string, input: Record<string, unknown>): Promise<Result> {
   // Calls that are not about a browser.
   switch (routeKey) {
-    case "browsers": return ok({ browsers: await d.browsers(agentId) });
+    case "computers": return ok({ computers: await d.computers(agentId) });
     case "howtos": return ok({ howtos: await d.howtos.list(agentId) });
     case "save-howto": {
       const name = str(input.name).slice(0, 80), steps = str(input.steps);
@@ -59,11 +61,11 @@ export async function handle(d: ActionDeps, agentId: string, routeKey: string, i
       return taught ? ok({ taught: name, to: taught }) : bad(404, `no how-to "${name}", or no agent "${to}" in your company`);
     }
     case "release": {
-      return (await d.release(agentId, str(input.browser))) ? ok({ released: str(input.browser) }) : bad(409, "you do not hold that browser");
+      return (await d.release(agentId, which(input))) ? ok({ released: which(input) }) : bad(409, "you are not using that shared computer");
     }
   }
 
-  const b = await d.browser(agentId, str(input.browser));
+  const b = await d.pick(agentId, which(input));
   if ("error" in b) return bad(b.status, b.error);
   const c = d.computer;
   const act = (path: string, body: Record<string, unknown>) => c.call(b.bot, "POST", path, body);
@@ -100,7 +102,7 @@ export async function handle(d: ActionDeps, agentId: string, routeKey: string, i
         if (!reason) return bad(400, "say what you need a person to do (reason)");
         const state = await act("/control/request", { reason });
         await d.needsPerson(agentId, b, "help", reason, await pageUrl());
-        return ok({ ...state, next: "A person has been asked. Now call /pc/wait (again until done is true): it returns when they hand the browser back, with the steps they took." });
+        return ok({ ...state, next: "A person has been asked. Now call /pc/wait (again until done is true): it returns when they hand the computer back, with the steps they took." });
       }
       case "ask-for-password": {
         const label = str(input.label) || "password";
@@ -126,12 +128,12 @@ export async function handle(d: ActionDeps, agentId: string, routeKey: string, i
     // Whatever a person did in this browser since the agent last heard, so it can learn it.
     const demo = await d.takeDemonstration(b.bot, agentId);
     if (demo && res.body && typeof res.body === "object") {
-      res.body = { ...(res.body as object), personDid: { ...demo, next: "A person used this browser. If these steps do something you will need again, save them as a how-to (/pc/howtos), or update the one they correct." } };
+      res.body = { ...(res.body as object), personDid: { ...demo, next: "A person used this computer. If these steps do something you will need again, save them as a how-to (/pc/howtos), or update the one they correct." } };
     }
     return res;
   } catch (err) {
     if (err instanceof ComputerError) {
-      const hint = err.body.humanHasControl ? " A person has the browser right now; call /pc/wait."
+      const hint = err.body.humanHasControl ? " A person has the computer right now; call /pc/wait."
         : err.body.stale || err.body.snapshotRequired ? " Take a fresh look (/pc/look) and use the new refs." : "";
       return { status: err.status === 499 ? 409 : err.status, body: { ...err.body, error: `${err.message}${hint}` } };
     }
