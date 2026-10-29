@@ -12,7 +12,7 @@ index f706ec8..e9baeca 100644
  # Readiness is exposed through Docker health so the supervisor need not know the network route.
  HEALTHCHECK --interval=2s --timeout=3s --start-period=2s --retries=30 \
 diff --git a/agent-computer/src/egress.ts b/agent-computer/src/egress.ts
-index bd651d3..11bfec9 100644
+index bd651d3..44c78fe 100644
 --- a/agent-computer/src/egress.ts
 +++ b/agent-computer/src/egress.ts
 @@ -55,6 +55,8 @@ export function egressFor(
@@ -74,6 +74,15 @@ index bd651d3..11bfec9 100644
  /** The NAT64 well-known prefix. On a network with a NAT64 gateway it reaches the IPv4 address in its last 32 bits. */
  const nat64 = new BlockList();
  nat64.addSubnet("64:ff9b::", 96, "ipv6");
+@@ -428,7 +462,7 @@ export function egressDecision(
+   if (denied !== undefined) {
+     return {
+       allowed: false,
+-      reason: `${host} is a cloud metadata or link-local address, which no Bot may reach.`,
++      reason: `${host} is ${process.env.EGRESS_BLOCK_PRIVATE === "on" ? "a private-network, cloud metadata or link-local" : "a cloud metadata or link-local"} address, which no Bot may reach.`,
+     };
+   }
+   if (policy.mode === "allow_all") {
 @@ -487,7 +521,15 @@ export function needsResolution(policy: EgressPolicy, host: string): boolean {
  
  /* --------------------------------- the filter on the computer --------------------------------- */
