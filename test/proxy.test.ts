@@ -22,15 +22,21 @@ async function rig() {
 
 test("a working proxy reports the address the world sees", async () => {
   const r = await rig();
-  try { const c = await checkProxy(`http://u:p@127.0.0.1:${r.port}`, r.target); assert.equal(c.ok, true); assert.equal((c as { ip: string }).ip, "203.0.113.7"); }
+  try { const c = await checkProxy(`http://u:p@127.0.0.1:${r.port}`, r.target, 15_000, true); assert.equal(c.ok, true); assert.equal((c as { ip: string }).ip, "203.0.113.7"); }
   finally { r.close(); }
 });
 
 test("wrong password, nothing listening, and nonsense are explained", async () => {
   const r = await rig();
   try {
-    assert.match((await checkProxy(`http://u:wrong@127.0.0.1:${r.port}`, r.target) as { error: string }).error, /username or password/);
-    assert.match((await checkProxy("http://127.0.0.1:1", r.target) as { error: string }).error, /refused the connection/);
+    assert.match((await checkProxy(`http://u:wrong@127.0.0.1:${r.port}`, r.target, 15_000, true) as { error: string }).error, /username or password/);
+    assert.match((await checkProxy("http://127.0.0.1:1", r.target, 15_000, true) as { error: string }).error, /refused the connection/);
     assert.match((await checkProxy("socks5://h:1", r.target) as { error: string }).error, /not supported/);
   } finally { r.close(); }
+});
+
+test("the proxy test refuses this machine and cloud metadata addresses", async () => {
+  for (const u of ["http://127.0.0.1:3100", "http://localhost:5432", "http://169.254.169.254", "http://[::1]:80", "http://100.64.0.1:8080"]) {
+    assert.match((await checkProxy(u) as { error: string }).error, /not allowed/, u);
+  }
 });

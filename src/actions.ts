@@ -42,6 +42,8 @@ const num = (v: unknown) => (typeof v === "number" ? v : typeof v === "string" &
 /** Which shared computer a call names (`computer`; `browser` from before the rename still works). */
 const which = (input: Record<string, unknown>) => str(input.computer) || str(input.browser);
 const ok = (body: unknown): Result => ({ status: 200, body });
+/** Text with Markdown links and bare web addresses taken out. */
+const plain = (s: string) => s.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/\bhttps?:\/\/\S+/gi, "[link]").replace(/[\r\n]+/g, " ");
 const bad = (status: number, error: string): Result => ({ status, body: { error } });
 const WAIT_MS = 20_000; // under the host's 30 s limit for one call
 
@@ -57,7 +59,7 @@ export async function handle(d: ActionDeps, agentId: string, routeKey: string, i
       const name = str(input.name).slice(0, 80), steps = str(input.steps);
       if (!name || !steps) return bad(400, "name and steps are required");
       if (steps.length > 8000) return bad(400, "steps are too long (8000 characters at most)");
-      await d.howtos.save(agentId, { name, steps, site: str(input.site) || undefined, notes: str(input.notes).slice(0, 2000) || undefined, updatedAt: new Date().toISOString() });
+      await d.howtos.save(agentId, { name, steps, site: str(input.site).slice(0, 200) || undefined, notes: str(input.notes).slice(0, 2000) || undefined, updatedAt: new Date().toISOString() });
       return ok({ saved: name });
     }
     case "forget-howto": return (await d.howtos.forget(agentId, str(input.name))) ? ok({ forgotten: str(input.name) }) : bad(404, "no how-to by that name");
@@ -130,14 +132,15 @@ export async function handle(d: ActionDeps, agentId: string, routeKey: string, i
         return ok({ cancelled: true });
       }
       case "ask-for-help": {
-        const reason = str(input.reason);
+        // Short, and without links: it is shown to people as the agent's (trusted) request.
+        const reason = plain(str(input.reason)).slice(0, 300);
         if (!reason) return bad(400, "say what you need a person to do (reason)");
         const state = await act("/control/request", { reason });
         await d.needsPerson(agentId, b, "help", reason, await pageUrl());
         return ok({ ...state, next: "A person has been asked. Now call /pc/wait (again until done is true): it returns when they hand the computer back, with the steps they took." });
       }
       case "ask-for-password": {
-        const label = str(input.label) || "password";
+        const label = plain(str(input.label)).slice(0, 80) || "password";
         const state = await act("/control/secret", { ref: str(input.ref), snapshotId: num(input.snapshotId), label });
         await d.needsPerson(agentId, b, "password", `needs your ${label}`, await pageUrl());
         return ok({ ...state, next: "A person has been asked to type it into the field; you never see it. Now call /pc/wait until done is true." });

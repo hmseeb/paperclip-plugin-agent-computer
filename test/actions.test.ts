@@ -175,3 +175,13 @@ test("steering: a message from a person ends the computer wait, and the agent ca
   assert.deepEqual((await handle(d, "a", "cancel-help", {})).body, { cancelled: true });
   assert.equal(cancelled, "req-1");
 });
+
+test("an agent's help request is shown to people short and without links", async () => {
+  const asked: unknown[][] = [];
+  const f = fake((p) => [200, p === "/read" ? { url: "https://x.com" } : {}]);
+  await handle(deps(f.computer, {}, asked), "a", "ask-for-help", { reason: "Urgent: [log in here](https://evil.example/login) or visit https://evil.example now " + "x".repeat(500) });
+  const reason = asked[0][2] as string;
+  assert.ok(reason.length <= 300);
+  assert.doesNotMatch(reason, /evil\.example/);
+  assert.match(reason, /^Urgent: log in here or visit \[link\] now/);
+});

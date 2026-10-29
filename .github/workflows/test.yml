@@ -25,4 +25,4 @@ jobs:
           git -C /tmp/openbot apply "$PWD/computer/human-browser.patch"
           cd /tmp/openbot && bun install --frozen-lockfile >/dev/null
           cd agent-computer && bun install --frozen-lockfile >/dev/null
-          bunx tsc --noEmit -p . && bun test tests/runtime-upstream.test.ts tests/live-page.test.ts
+          bunx tsc --noEmit -p . && bun test tests/runtime-upstream.test.ts tests/live-page.test.ts tests/private-network.test.ts

@@ -15,7 +15,7 @@ test("a person's steps read as a how-to, without anything they typed", () => {
     { at: 8, kind: "type", url: u, target: { role: "textbox", name: "[sensitive field]", sensitive: true } },
   ];
   assert.deepEqual(summarize(steps), [
-    "1. Opened https://app.gohighlevel.com/",
+    "1. Opened https://app.gohighlevel.com",
     "On app.gohighlevel.com/contacts:",
     '2. Clicked button "Export"',
     '3. Typed into textbox "Search"',
@@ -41,7 +41,7 @@ test("a shared browser is leased to one agent at a time, renewed by use, freed b
 
 test("shared browsers from settings: only well-formed ids", () => {
   assert.deepEqual(sharedComputers({ sharedComputers: [{ id: "shared-ghl", name: "GoHighLevel", agents: ["a"] }, { id: "../etc", name: "x" }] }),
-    [{ id: "shared-ghl", name: "GoHighLevel", allAgents: true, agents: ["a"], sites: [] }]);
+    [{ id: "shared-ghl", bot: "shared-ghl", name: "GoHighLevel", allAgents: true, agents: ["a"], sites: [] }]);
 });
 
 test("a shared browser is for every agent unless the board picks some", async () => {
@@ -81,4 +81,31 @@ test("a computer a person walked away from goes back to its agent; one being wat
   assert.equal(abandoned({ heldFor: 3 * min, viewers: 0, lastWatched: now - 6 * min, gatewayUp: 60 * min, now }), false, "just taken (from Mattermost, page still loading)");
   assert.equal(abandoned({ heldFor: 35 * min, viewers: 0, lastWatched: null, gatewayUp: 60 * min, now }), true, "no record of anyone watching, held 35 minutes");
   assert.equal(abandoned({ heldFor: 35 * min, viewers: 0, lastWatched: null, gatewayUp: 2 * min, now }), false, "gateway just restarted: give people time to reconnect");
+});
+
+test("steps keep no secrets from addresses: no query, no long or secret-looking parts, searches without words", async () => {
+  const { safeUrl, summarize } = await import("../src/learning.ts");
+  assert.equal(safeUrl("https://app.example.com/reset/abc?token=123#x"), "https://app.example.com/[redacted]/abc");
+  assert.equal(safeUrl("https://site.com/a/" + "x".repeat(50)), "https://site.com/a/[redacted]");
+  assert.equal(safeUrl("javascript:alert(1)"), "");
+  assert.deepEqual(summarize([{ at: 1, kind: "search" }, { at: 2, kind: "open", url: "https://login.example.com/cb?code=SECRET" }]),
+    ["1. Searched Google", "2. Opened https://login.example.com/cb"]);
+});
+
+test("shared computers are tied to their company, and a lease ends after an hour however busy", async () => {
+  const { sharedComputers, Leases } = await import("../src/learning.ts");
+  const [a] = sharedComputers({ sharedComputers: [{ id: "shared-ghl", name: "GHL" }] }, "25ad68f4-ac50");
+  const [b] = sharedComputers({ sharedComputers: [{ id: "shared-ghl", name: "GHL" }] }, "3ed8cd7c-f0c5");
+  assert.notEqual(a.bot, b.bot);
+  let now = 0;
+  const l = new Leases(10 * 60_000, () => now);
+  l.take("s", "greedy");
+  for (now = 0; now <= 55 * 60_000; now += 5 * 60_000) l.take("s", "greedy"); // keeps renewing
+  now = 58 * 60_000;
+  assert.equal(l.take("s", "other").ok, false);
+  now = 61 * 60_000;
+  assert.deepEqual(l.take("s", "greedy"), { ok: false, holder: "greedy", cooldown: true }, "its hour is up: not straight back");
+  assert.equal(l.take("s", "other").ok, true, "an hour is the most one agent holds it");
+  l.free("s");
+  assert.equal(l.holder("s"), null);
 });

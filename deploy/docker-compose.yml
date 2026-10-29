@@ -28,10 +28,11 @@ services:
     environment:
       COMPUTER_URL: http://agent-computer:4100
     mem_limit: 256m
-    # People's browsers must reach this one (the live screen). Either route
+    # Port 4200 is the live screen: people's browsers must reach it. Either route
     # https://<your paperclip>/_computer/ to it (see the README), or publish it on its own
     # address and set "Live screen address" in the plugin settings:
     # ports: ["4200:4200"]
+    # Port 4201 is for the plugin only (recorded steps, who is watching): never publish it.
 
 volumes:
   agent-computer-profiles:

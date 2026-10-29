@@ -1,5 +1,18 @@
+diff --git a/agent-computer/Dockerfile b/agent-computer/Dockerfile
+index f706ec8..e9baeca 100644
+--- a/agent-computer/Dockerfile
++++ b/agent-computer/Dockerfile
+@@ -41,6 +41,8 @@ RUN mkdir -p /workspace
+ ENV WORKSPACE_DIR=/workspace
+ 
+ ENV PORT=4100
++# Bots never reach the private network next to their computer (see egress.ts).
++ENV EGRESS_BLOCK_PRIVATE=on
+ EXPOSE 4100
+ # Readiness is exposed through Docker health so the supervisor need not know the network route.
+ HEALTHCHECK --interval=2s --timeout=3s --start-period=2s --retries=30 \
 diff --git a/agent-computer/src/egress.ts b/agent-computer/src/egress.ts
-index bd651d3..fd5b8ad 100644
+index bd651d3..11bfec9 100644
 --- a/agent-computer/src/egress.ts
 +++ b/agent-computer/src/egress.ts
 @@ -55,6 +55,8 @@ export function egressFor(
@@ -35,7 +48,33 @@ index bd651d3..fd5b8ad 100644
    const raw = env[egressVariableFor(botId)] ?? env.EGRESS_PROXY_DEFAULT;
    if (!raw?.trim()) return null;
    return splitProxyCredentials(raw);
-@@ -487,7 +502,15 @@ export function needsResolution(policy: EgressPolicy, host: string): boolean {
+@@ -371,6 +386,25 @@ const alwaysDenied = new BlockList();
+ for (const [address, prefix, family] of ALWAYS_DENIED)
+   alwaysDenied.addSubnet(address, prefix, family);
+ 
++/*
++ * The private network too, with EGRESS_BLOCK_PRIVATE=on (the Paperclip image sets it): loopback,
++ * RFC 1918, carrier-grade NAT and IPv6 unique-local. Without it a Bot told to "allow all" reaches
++ * the admin pages and databases next to its computer, which no web task needs.
++ */
++const PRIVATE_NETWORK: readonly [string, number, "ipv4" | "ipv6"][] = [
++  ["127.0.0.0", 8, "ipv4"],
++  ["10.0.0.0", 8, "ipv4"],
++  ["172.16.0.0", 12, "ipv4"],
++  ["192.168.0.0", 16, "ipv4"],
++  ["100.64.0.0", 10, "ipv4"],
++  ["0.0.0.0", 8, "ipv4"],
++  ["::1", 128, "ipv6"],
++  ["fc00::", 7, "ipv6"],
++];
++if (process.env.EGRESS_BLOCK_PRIVATE === "on")
++  for (const [address, prefix, family] of PRIVATE_NETWORK)
++    alwaysDenied.addSubnet(address, prefix, family);
++
+ /** The NAT64 well-known prefix. On a network with a NAT64 gateway it reaches the IPv4 address in its last 32 bits. */
+ const nat64 = new BlockList();
+ nat64.addSubnet("64:ff9b::", 96, "ipv6");
+@@ -487,7 +521,15 @@ export function needsResolution(policy: EgressPolicy, host: string): boolean {
  
  /* --------------------------------- the filter on the computer --------------------------------- */
  
@@ -52,7 +91,7 @@ index bd651d3..fd5b8ad 100644
  let filter: RunningFilter | null = null;
  const policies = new Map<string, EgressPolicy>();
  let policyRequired = true;
-@@ -819,6 +842,7 @@ export async function startEgressFilter(
+@@ -819,6 +861,7 @@ export async function startEgressFilter(
    }
    const secret = randomBytes(24).toString("base64url");
  
@@ -60,7 +99,7 @@ index bd651d3..fd5b8ad 100644
    const server = createServer(async (request, response) => {
      // A plain-HTTP request through a proxy names the absolute URL.
      let target: URL;
-@@ -828,7 +852,7 @@ export async function startEgressFilter(
+@@ -828,7 +871,7 @@ export async function startEgressFilter(
        response.writeHead(400).end("A proxy request names an absolute URL.");
        return;
      }
@@ -69,7 +108,7 @@ index bd651d3..fd5b8ad 100644
        request.headers["proxy-authorization"] as string | undefined,
        secret,
      );
-@@ -854,7 +878,7 @@ export async function startEgressFilter(
+@@ -854,7 +897,7 @@ export async function startEgressFilter(
      async (request: IncomingMessage, client: Socket, head: Buffer) => {
        const [host = "", portText = "443"] = splitHostPort(request.url ?? "");
        const port = Number(portText);
@@ -78,7 +117,7 @@ index bd651d3..fd5b8ad 100644
          request.headers["proxy-authorization"] as string | undefined,
          secret,
        );
-@@ -889,6 +913,9 @@ export async function startEgressFilter(
+@@ -889,6 +932,9 @@ export async function startEgressFilter(
        );
      },
    );
@@ -88,7 +127,7 @@ index bd651d3..fd5b8ad 100644
  
    await new Promise<void>((resolve, reject) => {
      server.once("error", reject);
-@@ -896,7 +923,7 @@ export async function startEgressFilter(
+@@ -896,7 +942,7 @@ export async function startEgressFilter(
    });
    const address = server.address();
    const port = typeof address === "object" && address ? address.port : 0;
@@ -97,7 +136,7 @@ index bd651d3..fd5b8ad 100644
  
    const url = `http://127.0.0.1:${port}`;
    if (options.forShell) shellProxy = url;
-@@ -909,10 +936,35 @@ export async function stopEgressFilter(): Promise<void> {
+@@ -909,10 +955,35 @@ export async function stopEgressFilter(): Promise<void> {
    shellProxy = null;
    policies.clear();
    if (running) {
@@ -133,7 +172,7 @@ index bd651d3..fd5b8ad 100644
  /** `URL.hostname` keeps an IPv6 address's brackets, and a socket given them looks the name up. */
  function unbracketed(hostname: string): string {
    return hostname.replace(/^\[|\]$/g, "");
-@@ -978,10 +1030,16 @@ export async function handleEgressPolicyRequest(
+@@ -978,10 +1049,16 @@ export async function handleEgressPolicyRequest(
  ): Promise<Response> {
    const body = (await request.json().catch(() => null)) as {
      policy?: unknown;
@@ -151,7 +190,7 @@ index bd651d3..fd5b8ad 100644
      setEgressPolicy(botId, null);
      return Response.json({ botId, policy: null, filtering: filter !== null });
 diff --git a/agent-computer/src/index.ts b/agent-computer/src/index.ts
-index b6640d1..15e91d6 100644
+index b6640d1..6e65e49 100644
 --- a/agent-computer/src/index.ts
 +++ b/agent-computer/src/index.ts
 @@ -597,7 +597,10 @@ serve<StreamData>({
@@ -166,7 +205,27 @@ index b6640d1..15e91d6 100644
            // The claim stops a cast it refuses, so a launch that lost the screen leaks nothing.
            if (!(await claim.install(cast))) return;
            casting = target;
-@@ -1000,6 +1003,62 @@ serve<StreamData>({
+@@ -863,6 +866,19 @@ serve<StreamData>({
+           ref?: unknown;
+           snapshotId?: unknown;
+         } | null;
++        // Only a password or code field: a person's secret aimed at a search box or a field the
++        // Bot's own page reads would be handed straight back to the Bot.
++        const sensitive = await (async () => {
++          try {
++            const target = await currentPage(botId);
++            const field = locateRef(session, target, String(body?.ref ?? ""), typeof body?.snapshotId === "number" ? body.snapshotId : undefined);
++            return await field.evaluate((el, selector) => el.matches(selector), SENSITIVE_FIELD_SELECTOR);
++          } catch {
++            return false;
++          }
++        })();
++        if (!sensitive)
++          return json({ error: "A person's secret can only be asked for into a password or one-time-code field. Look again and use that field's ref." }, 400);
+         try {
+           return json(session.control.requestSecret(body ?? {}));
+         } catch (error) {
+@@ -1000,6 +1016,62 @@ serve<StreamData>({
          return json(session.control.release(body.requestId));
        }
  
@@ -344,6 +403,20 @@ index 3aeb838..060d092 100644
      async stop(botId: string): Promise<boolean> {
        return closeOnRequest(botId, "it was stopped");
      },
+diff --git a/agent-computer/tests/private-network.test.ts b/agent-computer/tests/private-network.test.ts
+new file mode 100644
+index 0000000..80f4ea2
+--- /dev/null
++++ b/agent-computer/tests/private-network.test.ts
+@@ -0,0 +1,8 @@
++import { expect, test } from "bun:test";
++
++test("with EGRESS_BLOCK_PRIVATE=on the private network is denied like metadata addresses", async () => {
++  process.env.EGRESS_BLOCK_PRIVATE = "on";
++  const { isAlwaysDenied } = await import(`../src/egress.ts?private=${Date.now()}`);
++  for (const a of ["127.0.0.1", "10.1.2.3", "172.18.0.5", "192.168.1.1", "100.64.0.1", "::1", "fd12::1", "::ffff:10.0.0.1"]) expect(isAlwaysDenied(a)).toBe(true);
++  for (const a of ["93.184.215.14", "8.8.8.8", "2606:4700::1111"]) expect(isAlwaysDenied(a)).toBe(false);
++});
 diff --git a/agent-computer/tests/runtime-upstream.test.ts b/agent-computer/tests/runtime-upstream.test.ts
 new file mode 100644
 index 0000000..8eb6b8f

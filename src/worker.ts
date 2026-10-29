@@ -4,7 +4,7 @@ import { handle, type Target, type HowTo } from "./actions.ts";
 import { addressFor, checkProxy, Computer, egressFor, type ProxyCheck } from "./computer.ts";
 import { HELP } from "./help.ts";
 import { detached } from "./detach.ts";
-import { abandoned, Leases, mayUse, proxyChoice, sharedComputers, summarize, type Demonstration, type SharedComputer, type Step } from "./learning.ts";
+import { abandoned, Leases, mayUse, proxyChoice, safeUrl, sharedComputers, summarize, type Demonstration, type SharedComputer, type Step } from "./learning.ts";
 
 let ctx: PluginContext;
 
@@ -62,6 +62,8 @@ interface Tenant {
 const PROXY_CHECK_MS = 60_000;
 
 const tenants = new Map<string, Tenant>();
+/** When each company last tested proxies (at most 10 a minute). */
+const proxyTests = new Map<string, number[]>();
 
 async function start(companyId: string, config: Record<string, unknown>): Promise<Tenant | null> {
   const url = typeof config.computerUrl === "string" ? config.computerUrl.trim() : "";
@@ -84,8 +86,8 @@ async function start(companyId: string, config: Record<string, unknown>): Promis
   }
   const agentProxy = (config.agentProxies && typeof config.agentProxies === "object" ? config.agentProxies : {}) as Record<string, string>;
   const defaultProxy = typeof config.defaultProxy === "string" ? config.defaultProxy : undefined;
-  const shared = sharedComputers(config);
-  const proxyFor = (bot: string) => proxyChoice(shared.find((b) => b.id === bot)?.proxy ?? agentProxy[bot], defaultProxy);
+  const shared = sharedComputers(config, companyId);
+  const proxyFor = (bot: string) => proxyChoice(shared.find((b) => b.bot === bot)?.proxy ?? agentProxy[bot], defaultProxy);
   const proxyHealth = new Map<string, ProxyCheck & { at: number }>();
   // A proxy that is down: by default the computer's own connection instead, so work goes on; with
   // "stop" it stays on the dead proxy and pages fail, so sites never see the computer's own address.
@@ -109,7 +111,7 @@ async function start(companyId: string, config: Record<string, unknown>): Promis
   const t: Tenant = {
     computer: new Computer(url, token, fetch, upstream), token, sites, shared,
     screenUrl: typeof config.screenUrl === "string" ? config.screenUrl.trim().replace(/\/+$/, "") : "",
-    gatewayUrl: (typeof config.gatewayUrl === "string" && config.gatewayUrl.trim()) || "http://agent-computer-gateway:4200",
+    gatewayUrl: (typeof config.gatewayUrl === "string" && config.gatewayUrl.trim()) || "http://agent-computer-gateway:4201", // its internal port
     // Leases and takeovers survive a settings save.
     leases: old?.leases ?? new Leases(), takenAt: old?.takenAt ?? new Map(), chrome: old?.chrome ?? new Map(),
     pending: old?.pending ?? new Map(), lastUsed: old?.lastUsed ?? new Map(), steered: old?.steered ?? new Set(),
@@ -137,7 +139,7 @@ async function handBackAbandoned(companyId: string): Promise<void> {
     .then((r) => (r.ok ? r.json() as Promise<{ computers: Record<string, { viewers: number; lastWatched: number | null }>; since: number }> : null)).catch(() => null);
   if (!watching) return; // without the gateway nothing can be known about who is watching
   const agents = (await ctx.agents.list({ companyId, limit: 500 })).filter((a) => a.status !== "terminated");
-  for (const bot of [...agents.map((a) => a.id), ...t.shared.map((b) => b.id)]) {
+  for (const bot of [...agents.map((a) => a.id), ...t.shared.map((b) => b.bot)]) {
     const c = await t.computer.call<{ holder?: string; since?: string; request?: { id?: string; reason?: string } }>(bot, "GET", "/control", undefined, 5000).catch(() => null);
     if (c?.holder !== "human") continue;
     const w = watching.computers[bot];
@@ -172,7 +174,7 @@ async function ensureSkill(companyId: string): Promise<string | null> {
 
 const findShared = (t: Tenant, name: string) => {
   const n = name.trim().toLowerCase();
-  return t.shared.find((b) => b.id === n || b.name.toLowerCase() === n);
+  return t.shared.find((b) => b.id === n || b.bot === n || b.name.toLowerCase() === n);
 };
 
 /** What a person did in a browser from taking it until now: the recorder's steps plus the chrome. */
@@ -201,7 +203,10 @@ const plugin = definePlugin({
       const proxies = Object.fromEntries([...t.proxies.keys()].map((id) => [id, t.proxyHealth.get(id) ?? null]));
       return { connected: h.startsWith("Connected"), status: h, proxies, fallback: t.fallback, versionNote };
     });
-    ctx.actions.register("skill", async (params) => ({ key: await ensureSkill(String(params.companyId)) }));
+    ctx.actions.register("skill", async (params, context) => {
+      if (context.actor.type !== "user") throw new Error("Only people can do this.");
+      return { key: await ensureSkill(String(params.companyId)) };
+    });
     // Steering from the Mattermost plugin: a person wrote to an agent mid-run; its computer wait ends early.
     ctx.events.on("plugin.mattermost-bridge.person-wrote", async (e) => {
       const agentId = (e.payload as { agentId?: string } | undefined)?.agentId;
@@ -210,6 +215,10 @@ const plugin = definePlugin({
     // Settings: try a proxy, a pasted URL before it is saved or a saved one by id.
     ctx.actions.register("test-proxy", async (params, context) => {
       if (context.actor.type !== "user") throw new Error("Only people can test proxies.");
+      const key = String(params.companyId ?? "");
+      const recent = (proxyTests.get(key) ?? []).filter((at) => Date.now() - at < 60_000);
+      if (recent.length >= 10) return { ok: false, error: "Too many tests in a minute; wait a moment.", ms: 0 };
+      proxyTests.set(key, [...recent, Date.now()]);
       if (typeof params.url === "string" && params.url.trim()) return checkProxy(params.url);
       const t = await tenant(String(params.companyId ?? ""));
       const p = t?.proxies.get(String(params.proxyId ?? ""));
@@ -235,8 +244,8 @@ const plugin = definePlugin({
       const t = await tenant(companyId);
       if (!t) throw new Error("The agent computer is not set up for this company (plugin settings).");
       const id = typeof params.agentId === "string" ? params.agentId : "";
-      const shared = t.shared.find((b) => b.id === id);
-      if (shared) return { t, bot: shared.id, sites: shared.sites, companyId };
+      const shared = t.shared.find((b) => b.bot === id);
+      if (shared) return { t, bot: shared.bot, sites: shared.sites, companyId };
       const agent = id ? await ctx.agents.get(id, companyId) : null;
       if (!agent) throw new Error("No such agent or shared computer in this company.");
       return { t, bot: agent.id, sites: t.sites.get(agent.id) ?? [], companyId };
@@ -249,7 +258,7 @@ const plugin = definePlugin({
       const name = (id: string | null) => (id ? agents.find((a) => a.id === id)?.name ?? "an agent" : null);
       return {
         agents: agents.map((a) => ({ id: a.id, name: a.name })),
-        shared: (t?.shared ?? []).map((b) => ({ id: b.id, name: b.name, inUseBy: name(t!.leases.holder(b.id)) })),
+        shared: (t?.shared ?? []).map((b) => ({ id: b.bot, name: b.name, inUseBy: name(t!.leases.holder(b.id)) })),
       };
     });
     // The overlay on every page: computers waiting for a person, and the one of the agent being chatted with.
@@ -262,7 +271,7 @@ const plugin = definePlugin({
       const agents = (await ctx.agents.list({ companyId, limit: 500 })).filter((x) => x.status !== "terminated");
       const nameOf = (id: string | null) => agents.find((x) => x.id === id)?.name ?? "An agent";
       const bots = [...agents.map((x) => ({ bot: x.id, agentId: x.id, computer: null as string | null })),
-        ...t.shared.map((b) => ({ bot: b.id, agentId: t.leases.holder(b.id), computer: b.name }))];
+        ...t.shared.map((b) => ({ bot: b.bot, agentId: t.leases.holder(b.id), computer: b.name }))];
       const waiting = (await Promise.all(bots.map(async (b) => {
         const c = await t.computer.call<{ holder?: string; requested?: boolean; secretWanted?: string; request?: { reason?: string; createdAt?: string } }>(b.bot, "GET", "/control", undefined, 3000).catch(() => null);
         // A request a person has not taken yet, or a password field waiting for them.
@@ -279,6 +288,15 @@ const plugin = definePlugin({
         if (a && Date.now() - used < 3 * 60_000) active = { bot: a.id, agentName: a.name };
       }
       return { pending: waiting.sort((x, y) => y.at - x.at), active };
+    });
+    // A person freeing a shared computer an agent is holding on to.
+    ctx.actions.register("free-shared", async (params, context) => {
+      person(context);
+      const t = await tenant(String(params.companyId ?? ""));
+      const b = t?.shared.find((x) => x.bot === params.agentId);
+      if (!t || !b) throw new Error("No such shared computer.");
+      t.leases.free(b.id);
+      return { freed: b.name };
     });
     ctx.actions.register("howtos", async (params, context) => {
       person(context);
@@ -339,9 +357,11 @@ const plugin = definePlugin({
     ctx.actions.register("stream-ticket", async (params, context) => {
       person(context);
       const { t, bot } = await forTab(params);
+      // "view" (the corner card) may only watch; "drive" may send input while its person holds it.
+      const mode = params.mode === "view" ? "view" : "drive";
       const exp = String(Math.floor(Date.now() / 1000) + 60);
-      const sig = createHmac("sha256", t.ticketKey).update(`${bot}.${exp}`).digest("hex");
-      return { path: `/_computer/stream?agent=${bot}&exp=${exp}&sig=${sig}`, base: t.screenUrl || null };
+      const sig = createHmac("sha256", t.ticketKey).update(`${bot}.${exp}.${mode}`).digest("hex");
+      return { path: `/_computer/stream?agent=${bot}&exp=${exp}&mode=${mode}&sig=${sig}`, base: t.screenUrl || null };
     });
     // The browser chrome: address bar, back, forward, reload and tabs. They act as the person, so a
     // person who does not hold the browser yet takes it first, as they would to click on the page.
@@ -367,7 +387,8 @@ const plugin = definePlugin({
         await new Promise((r) => setTimeout(r, 1500)); // Chrome takes a moment to drop the dead route
         return go().catch(async () => { await new Promise((r) => setTimeout(r, 1500)); return go(); });
       });
-      chromeStep(t, bot, { at: Date.now(), kind: "open", url: r.url ?? addressFor(url) });
+      const target = addressFor(url);
+      chromeStep(t, bot, target.startsWith("https://www.google.com/search?") ? { at: Date.now(), kind: "search" } : { at: Date.now(), kind: "open", url: safeUrl(r.url ?? target) });
       return r;
     });
     ctx.actions.register("history", async (params, context) => {
@@ -431,9 +452,10 @@ const plugin = definePlugin({
         if (!b) return { status: 404, error: `There is no shared computer "${name}". /pc/computers lists yours.` };
         if (!mayUse(b, id)) return { status: 403, error: `You may not use the shared computer "${b.name}"; the board decides in the plugin settings.` };
         const lease = t.leases.take(b.id, id);
-        if (!lease.ok) return { status: 409, error: `"${b.name}" is in use by ${await nameOf(lease.holder)}. Try again in a few minutes; it frees up 10 minutes after their last use.` };
+        if (!lease.ok && lease.cooldown) return { status: 409, error: `You have had "${b.name}" for an hour, so it is open to other agents for the next 2 minutes. Try again after that.` };
+        if (!lease.ok) return { status: 409, error: `"${b.name}" is in use by ${await nameOf(lease.holder)}. Try again in a few minutes; it frees up 10 minutes after their last use (or after an hour at most).` };
         t.lastUsed.set(id, Date.now());
-        return { bot: b.id, label: b.name, sites: b.sites, shared: true };
+        return { bot: b.bot, label: b.name, sites: b.sites, shared: true };
       },
       async computers(id) {
         return [{ name: "your own", shared: false, inUseBy: null },
@@ -490,8 +512,13 @@ const plugin = definePlugin({
           const target = (await agents()).find((a) => a.status !== "terminated" && (a.id === to || a.name.toLowerCase() === to.replace(/^@/, "").toLowerCase()));
           if (!h || !target || target.id === id) return null;
           const teacher = await nameOf(id);
-          const theirs = ((await s.get<HowTo[]>(`howtos:${target.id}`)) ?? []).filter((x) => x.name.toLowerCase() !== h.name.toLowerCase());
-          await s.set(`howtos:${target.id}`, [...theirs, { ...h, learnedFrom: teacher ?? undefined, updatedAt: new Date().toISOString() }].slice(-100));
+          // Never replaces what the other agent knows, and never pushes its own how-tos out.
+          const theirs = (await s.get<HowTo[]>(`howtos:${target.id}`)) ?? [];
+          if (theirs.length >= 100) return null;
+          const taken = (n: string) => theirs.some((x) => x.name.toLowerCase() === n.toLowerCase());
+          const asName = !taken(h.name) ? h.name : `${h.name} (from ${teacher ?? "another agent"})`;
+          if (taken(asName)) return null;
+          await s.set(`howtos:${target.id}`, [...theirs, { ...h, name: asName, learnedFrom: teacher ?? undefined, updatedAt: new Date().toISOString() }]);
           return target.name;
         },
       },

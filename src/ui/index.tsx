@@ -277,6 +277,7 @@ export function ComputersLink({ context }: PluginSidebarProps) {
 export function ComputersPage({ context }: PluginPageProps) {
   const companyId = context.companyId;
   const computers = usePluginAction("computers");
+  const freeShared = usePluginAction("free-shared");
   const attention = usePluginAction("attention");
   const [needs, setNeeds] = useState<Map<string, string>>(new Map());
   useEffect(() => {
@@ -334,7 +335,13 @@ export function ComputersPage({ context }: PluginPageProps) {
       <div style={{ display: "grid", gap: 4, alignContent: "start" }}>
         {list?.shared.length ? <>
           <div style={{ ...s.label, marginBottom: 6 }}>Shared computers</div>
-          {list.shared.map((b) => item(b.id, b.name, b.inUseBy ? `in use by ${b.inUseBy}` : "free"))}
+          {list.shared.map((b) => (
+            <div key={b.id} style={{ display: "grid", gap: 2 }}>
+              {item(b.id, b.name, b.inUseBy ? `in use by ${b.inUseBy}` : "free")}
+              {b.inUseBy ? <button style={{ ...s.button, padding: "2px 8px", fontSize: 12, justifySelf: "start", marginLeft: 8 }}
+                onClick={() => void freeShared({ companyId, agentId: b.id }).then(() => computers({ companyId }).then((r) => setList(r as never)))}>Free it</button> : null}
+            </div>
+          ))}
           <div style={{ height: 12 }} />
         </> : null}
         <div style={{ ...s.label, marginBottom: 6 }}>Agents</div>
@@ -437,7 +444,7 @@ function LiveView({ companyId, agentId, autoTake = false }: { companyId: string;
       {c?.requested && !mine ? <div style={s.warn}><b>The agent is asking for help:</b> {c.request?.reason ?? c.reason ?? "it is stuck"}. Take over, do what it needs, then hand back.</div> : null}
       {c?.secretWanted ? (
         <div style={s.warn}>
-          <div style={{ marginBottom: 8 }}><b>The agent needs your {c.secretWanted}.</b> It goes straight into the field on the page; the agent never sees it.</div>
+          <div style={{ marginBottom: 8 }}><b>The agent needs your {c.secretWanted}</b>{url ? <> for <b>{(() => { try { return new URL(url).host; } catch { return url; } })()}</b></> : null}. Check that is the site you expect: it goes straight into the password field on that page, and the agent never sees it.</div>
           <div style={s.row}>
             <input style={{ ...s.input, maxWidth: 320 }} type="password" autoComplete="off" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={c.secretWanted} />
             <button style={{ ...s.button, ...s.primary }} disabled={busy || !password} onClick={() => run(async () => { await secret({ companyId, agentId, text: password }); setPassword(""); }, "Entered.")}>Enter it</button>
@@ -542,7 +549,8 @@ export function ComputerOverlay({ context }: PluginSidebarProps) {
   const target = ask ? { bot: ask.bot, agentName: ask.agentName } : active;
   const key = ask ? keyOf(ask) : target ? `${target.bot}:active` : null;
   const bot = target?.bot ?? "";
-  const ticket = useCallback(async () => { const t = (await streamTicket({ companyId, agentId: bot })) as { path: string; base: string | null }; return `${t.base ?? ""}${t.path}`; }, [companyId, bot]);
+  // View-only: the card watches; driving happens in the full-size view.
+  const ticket = useCallback(async () => { const t = (await streamTicket({ companyId, agentId: bot, mode: "view" })) as { path: string; base: string | null }; return `${t.base ?? ""}${t.path}`; }, [companyId, bot]);
   const onProblem = useCallback((p: string | null) => setProblem(p), []);
   if (!companyId) return null;
   if (expanded) {

@@ -5,7 +5,20 @@
 
 export type Step =
   | { at: number; kind: "click" | "type" | "key" | "scroll"; key?: string; deltaY?: number; url?: string; target?: { role?: string; name?: string; sensitive?: boolean } }
-  | { at: number; kind: "open" | "back" | "forward" | "reload" | "new-tab" | "switch-tab" | "close-tab"; url?: string };
+  | { at: number; kind: "open" | "search" | "back" | "forward" | "reload" | "new-tab" | "switch-tab" | "close-tab"; url?: string };
+
+/**
+ * An address as a how-to may keep it: origin and path, with long or secret-looking parts removed and
+ * no query or fragment (reset links, login codes and searches live there). As the computer's recorder does.
+ */
+export function safeUrl(raw?: string): string {
+  try {
+    const u = new URL(raw ?? "");
+    if (!/^https?:$/.test(u.protocol)) return "";
+    const path = u.pathname.split("/").map((p) => (p.length > 40 || /token|secret|password|credential|reset|magic|code/i.test(p) ? "[redacted]" : p)).join("/");
+    return `${u.origin}${path === "/" ? "" : path}`;
+  } catch { return ""; }
+}
 
 export interface Demonstration {
   /** When the person took the browser and handed it back. */
@@ -35,12 +48,13 @@ export function summarize(steps: Step[]): string[] {
     const where = host(s.url);
     if (where && where !== page && s.kind !== "open") { page = where; push(`On ${where}:`); }
     switch (s.kind) {
-      case "open": page = host(s.url); push(`Opened ${s.url}`); break;
+      case "open": page = host(s.url); push(`Opened ${safeUrl(s.url) || "a page"}`); break;
+      case "search": push("Searched Google"); break;
       case "back": push("Went back"); break;
       case "forward": push("Went forward"); break;
       case "reload": push("Reloaded the page"); break;
       case "new-tab": push("Opened a new tab"); break;
-      case "switch-tab": push(`Switched to the tab with ${s.url ?? "another page"}`); break;
+      case "switch-tab": push(`Switched to the tab with ${safeUrl(s.url) || "another page"}`); break;
       case "close-tab": push("Closed a tab"); break;
       case "click": push(`Clicked ${what(s.target)}`); break;
       case "type": push(s.target?.sensitive ? "Typed a password or code (a person's secret: ask for it with ask-for-password)" : `Typed into ${what(s.target)}`); break;
@@ -54,13 +68,18 @@ export function summarize(steps: Step[]): string[] {
 }
 
 /** `allAgents` (the default): every agent of the company, new ones included; otherwise only `agents`. */
-export interface SharedComputer { id: string; name: string; allAgents: boolean; agents: string[]; sites: string[]; proxy?: string }
+/** `bot`: the computer's id for it, tied to the company so two companies never share one by accident. */
+export interface SharedComputer { id: string; bot: string; name: string; allAgents: boolean; agents: string[]; sites: string[]; proxy?: string }
 
 export const mayUse = (b: SharedComputer, agentId: string) => b.allAgents || b.agents.includes(agentId);
 
 /** Which browser a call uses: the agent's own, or a shared one it is allowed, leased to one agent at a time. */
 export class Leases {
-  private held = new Map<string, { agentId: string; until: number }>();
+  private held = new Map<string, { agentId: string; until: number; since: number }>();
+  /** However busy, a shared computer is free for others after this long with one agent. */
+  static MAX_HOLD_MS = 60 * 60_000;
+  /** After that hour, the same agent waits this long before taking it again, so others get a turn. */
+  static COOLDOWN_MS = 2 * 60_000;
   private ttlMs: number;
   private now: () => number;
   constructor(ttlMs = 10 * 60_000, now = () => Date.now()) {
@@ -69,10 +88,13 @@ export class Leases {
   }
 
   /** Takes or renews the lease; returns who holds it when someone else does. */
-  take(computerId: string, agentId: string): { ok: true } | { ok: false; holder: string } {
+  take(computerId: string, agentId: string): { ok: true } | { ok: false; holder: string; cooldown?: boolean } {
     const h = this.held.get(computerId);
-    if (h && h.agentId !== agentId && h.until > this.now()) return { ok: false, holder: h.agentId };
-    this.held.set(computerId, { agentId, until: this.now() + this.ttlMs });
+    const live = h && h.until > this.now() && this.now() - h.since < Leases.MAX_HOLD_MS;
+    if (h && live && h.agentId !== agentId) return { ok: false, holder: h.agentId };
+    const hourUp = h && h.agentId === agentId && h.until > this.now() - Leases.COOLDOWN_MS && this.now() - h.since >= Leases.MAX_HOLD_MS;
+    if (hourUp && this.now() - (h.since + Leases.MAX_HOLD_MS) < Leases.COOLDOWN_MS) return { ok: false, holder: agentId, cooldown: true };
+    this.held.set(computerId, { agentId, until: this.now() + this.ttlMs, since: h && live && h.agentId === agentId ? h.since : this.now() });
     return { ok: true };
   }
 
@@ -85,16 +107,21 @@ export class Leases {
 
   holder(computerId: string): string | null {
     const h = this.held.get(computerId);
-    return h && h.until > this.now() ? h.agentId : null;
+    return h && h.until > this.now() && this.now() - h.since < Leases.MAX_HOLD_MS ? h.agentId : null;
+  }
+
+  /** A person freeing a shared computer an agent is holding on to. */
+  free(computerId: string): void {
+    this.held.delete(computerId);
   }
 }
 
-export function sharedComputers(config: Record<string, unknown>): SharedComputer[] {
+export function sharedComputers(config: Record<string, unknown>, companyId = ""): SharedComputer[] {
   const saved = config.sharedComputers ?? config.sharedBrowsers; // the setting's name before the rename
   const list = Array.isArray(saved) ? (saved as Partial<SharedComputer>[]) : [];
   return list
     .filter((b): b is SharedComputer => typeof b?.id === "string" && /^shared-[a-z0-9-]{1,50}$/.test(b.id) && typeof b.name === "string")
-    .map((b) => ({ id: b.id, name: b.name, allAgents: b.allAgents !== false, agents: Array.isArray(b.agents) ? b.agents : [], sites: Array.isArray(b.sites) ? b.sites : [], ...(typeof b.proxy === "string" && b.proxy ? { proxy: b.proxy } : {}) }));
+    .map((b) => ({ id: b.id, bot: companyId ? `${b.id}-${companyId.replace(/[^a-z0-9]/gi, "").slice(0, 8)}` : b.id, name: b.name, allAgents: b.allAgents !== false, agents: Array.isArray(b.agents) ? b.agents : [], sites: Array.isArray(b.sites) ? b.sites : [], ...(typeof b.proxy === "string" && b.proxy ? { proxy: b.proxy } : {}) }));
 }
 
 /**

@@ -93,13 +93,25 @@ Several companies can share one computer; each needs the token secret in its own
 - **Agents only drive their own computer** (or a shared one they may use). Paperclip tells the plugin
   which agent is calling; the computer's token never leaves the server.
 - **The Computers page and corner card are for people.** Calls an agent makes to them are refused.
-- **The live screen** needs a link the plugin signs for one computer, valid for 60 seconds. The
-  computer itself refuses input unless a person holds it.
+- **The live screen** needs a link the plugin signs for one computer, used once, valid for 60
+  seconds, and "view only" for the corner card. The computer itself refuses input unless a person holds
+  it. The gateway's other endpoints (recorded steps, who is watching) are on a second port, 4201, that
+  only the plugin uses: never route it from outside.
+- **No private network.** Agents' browsers can't reach loopback or private addresses (the admin pages
+  and databases next to the computer) or cloud metadata addresses. Set `EGRESS_BLOCK_PRIVATE=off` on the
+  computer only if agents really need an internal site.
+- **Password prompts** only go to password or one-time-code fields, and name the site asking.
+- **How-tos one agent teaches another** never replace what that agent already knows.
 - **Passwords** typed for an agent go into the page field and are not stored, logged, returned or
   shown to the agent. Recorded steps never include what was typed.
 - **Proxies** are kept as Paperclip secrets and only sent to the computer.
 - **Treat the computer token like a password.** Anyone holding it can drive every computer, with its
   saved logins. Rotate it in both places (the token file and the Paperclip secret) if it leaks.
+- **Not for Paperclip's `local_trusted` mode.** There every local request counts as the board, so a
+  process on the same machine (an agent's shell, for example) passes the "people only" checks.
+- **Inside the computer container,** each browser's local proxy port needs no password, so a program
+  running in that container could go out as any browser. The plugin never runs programs there (it
+  doesn't expose the computer's shell); keep it that way if you use the computer for anything else.
 
 ## Limits
 
