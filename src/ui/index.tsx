@@ -41,6 +41,7 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
   const [secrets, setSecrets] = useState<Secret[]>([]);
   const [agents, setAgents] = useState<AgentRow[]>([]);
   const [sites, setSites] = useState<Record<string, string>>({});
+  const [shared, setShared] = useState<{ id: string; name: string; agents: string[]; sites: string }[]>([]);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [saving, setSaving] = useState(false);
   const setup = usePluginData<{ connected: boolean; status: string }>("setup", { companyId });
@@ -57,6 +58,8 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
       setConfig({ computerUrl: "http://agent-computer:4100", ...c });
       setSecrets(secs.filter((x) => !x.deletedAt && x.status !== "deleted"));
       setAgents(ags.filter((a) => a.status !== "terminated"));
+      setShared((Array.isArray(c.sharedBrowsers) ? (c.sharedBrowsers as { id: string; name: string; agents?: string[]; sites?: string[] }[]) : [])
+        .map((b) => ({ id: b.id, name: b.name, agents: b.agents ?? [], sites: (b.sites ?? []).join(", ") })));
       setSites(Object.fromEntries((Array.isArray(c.sites) ? (c.sites as { agentId: string; sites?: string[] }[]) : []).map((x) => [x.agentId, (x.sites ?? []).join(", ")])));
     }).catch((e) => setNote({ ok: false, text: `Could not load the settings: ${errText(e)}` }));
   }, [companyId]);
@@ -72,7 +75,9 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
     setNote(null);
     try {
       const list = Object.entries(sites).map(([agentId, v]) => ({ agentId, sites: v.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean) })).filter((x) => x.sites.length);
-      const next = { ...config!, computerUrl: String(config!.computerUrl).trim(), sites: list };
+      const split = (v: string) => v.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
+      const sharedBrowsers = shared.filter((b) => b.name.trim()).map((b) => ({ id: b.id, name: b.name.trim(), agents: b.agents, sites: split(b.sites) }));
+      const next = { ...config!, computerUrl: String(config!.computerUrl).trim(), sites: list, sharedBrowsers };
       await api(`/api/plugins/${PLUGIN}/config`, { method: "POST", body: JSON.stringify({ companyId, configJson: next }) });
       setConfig(next);
       // Every agent gets the skill, alongside its other skills.
@@ -114,6 +119,30 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
           ))}
         </div>
       </Field>
+      <Field label="Shared browsers" help="A named browser several agents use, one at a time, for example one logged into GoHighLevel. Log it in once from the Computers page; the agents ticked here can use it.">
+        <div style={{ display: "grid", gap: 12 }}>
+          {shared.map((b, i) => {
+            const edit = (patch: Partial<typeof b>) => { setNote(null); setShared(shared.map((x, j) => (j === i ? { ...x, ...patch } : x))); };
+            return (
+              <div key={b.id} style={{ display: "grid", gap: 8, padding: 12, borderRadius: 8, border: "1px solid rgba(127,127,127,.3)" }}>
+                <div style={s.row}>
+                  <input style={{ ...s.input, flex: 1 }} value={b.name} onChange={(e) => edit({ name: e.target.value })} placeholder="Name, e.g. GoHighLevel" />
+                  <button style={s.button} onClick={() => { setNote(null); setShared(shared.filter((_, j) => j !== i)); }}>Remove</button>
+                </div>
+                <input style={s.input} value={b.sites} onChange={(e) => edit({ sites: e.target.value })} placeholder="Allowed sites (empty: any)" />
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 14px" }}>
+                  {agents.map((a) => (
+                    <label key={a.id} style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13 }}>
+                      <input type="checkbox" checked={b.agents.includes(a.id)} onChange={() => edit({ agents: b.agents.includes(a.id) ? b.agents.filter((x) => x !== a.id) : [...b.agents, a.id] })} />{a.name}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+          <div><button style={s.button} onClick={() => setShared([...shared, { id: `shared-${Math.random().toString(36).slice(2, 10)}`, name: "", agents: [], sites: "" }])}>Add a shared browser</button></div>
+        </div>
+      </Field>
       <div style={s.row}>
         <button style={{ ...s.button, ...s.primary }} disabled={saving} onClick={save}>{saving ? "Saving…" : "Save"}</button>
         {note ? <span style={note.ok ? s.ok : s.bad}>{note.text}</span> : null}
@@ -143,13 +172,21 @@ export function ComputersLink({ context }: PluginSidebarProps) {
 /** Every agent's browser; ?agent=<id> picks one (the Mattermost Take over button links there). */
 export function ComputersPage({ context }: PluginPageProps) {
   const companyId = context.companyId;
-  const [agents, setAgents] = useState<AgentRow[]>([]);
+  const browsers = usePluginAction("browsers");
+  const [list, setList] = useState<{ agents: { id: string; name: string }[]; shared: { id: string; name: string; inUseBy: string | null }[] } | null>(null);
   const [agentId, setAgentId] = useState<string | null>(() => new URLSearchParams(window.location.search).get("agent"));
   useEffect(() => {
     if (!companyId) return;
-    api<AgentRow[] | { agents: AgentRow[] }>(`/api/companies/${companyId}/agents`).then((r) => (Array.isArray(r) ? r : r.agents))
-      .then((list) => { const live = list.filter((a) => a.status !== "terminated"); setAgents(live); setAgentId((cur) => cur ?? live[0]?.id ?? null); })
-      .catch(() => setAgents([]));
+    let live = true;
+    const load = () => browsers({ companyId }).then((r) => {
+      if (!live) return;
+      const l = r as NonNullable<typeof list>;
+      setList(l);
+      setAgentId((cur) => cur ?? l.agents[0]?.id ?? null);
+    }).catch(() => undefined);
+    void load();
+    const timer = setInterval(load, 15_000); // who is using which shared browser
+    return () => { live = false; clearInterval(timer); };
   }, [companyId]);
   const pick = (id: string) => {
     setAgentId(id);
@@ -158,15 +195,56 @@ export function ComputersPage({ context }: PluginPageProps) {
     window.history.replaceState(null, "", u);
   };
   if (!companyId) return null;
+  const item = (id: string, label: string, sub?: string | null) => (
+    <button key={id} onClick={() => pick(id)} style={{ ...s.button, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", display: "grid", ...(id === agentId ? { borderColor: "#2f6fed" } : { borderColor: "transparent" }) }}>
+      <span>{label}</span>{sub ? <span style={{ ...s.help, fontSize: 11.5 }}>{sub}</span> : null}
+    </button>
+  );
+  const isShared = Boolean(list?.shared.some((b) => b.id === agentId));
   return (
     <div style={{ display: "grid", gridTemplateColumns: "minmax(0,220px) minmax(0,1fr)", gap: 20, padding: 16 }}>
       <div style={{ display: "grid", gap: 4, alignContent: "start" }}>
+        {list?.shared.length ? <>
+          <div style={{ ...s.label, marginBottom: 6 }}>Shared browsers</div>
+          {list.shared.map((b) => item(b.id, b.name, b.inUseBy ? `in use by ${b.inUseBy}` : "free"))}
+          <div style={{ height: 12 }} />
+        </> : null}
         <div style={{ ...s.label, marginBottom: 6 }}>Agents</div>
-        {agents.map((a) => (
-          <button key={a.id} onClick={() => pick(a.id)} style={{ ...s.button, textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", ...(a.id === agentId ? { borderColor: "#2f6fed" } : { borderColor: "transparent" }) }}>{a.name}</button>
-        ))}
+        {(list?.agents ?? []).map((a) => item(a.id, a.name))}
       </div>
-      {agentId ? <LiveView key={agentId} companyId={companyId} agentId={agentId} /> : <div style={s.help}>No agents.</div>}
+      {agentId ? <div style={{ display: "grid", gap: 18, alignContent: "start", minWidth: 0 }}>
+        <LiveView key={agentId} companyId={companyId} agentId={agentId} />
+        {isShared ? null : <HowTos key={`h-${agentId}`} companyId={companyId} agentId={agentId} />}
+      </div> : <div style={s.help}>No agents.</div>}
+    </div>
+  );
+}
+
+/** What this agent has learned from people, as it saved it. */
+function HowTos({ companyId, agentId }: { companyId: string; agentId: string }) {
+  const howtos = usePluginAction("howtos");
+  const [list, setList] = useState<{ name: string; site?: string; steps: string; updatedAt: string; learnedFrom?: string }[] | null>(null);
+  const [open, setOpen] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    const load = () => howtos({ companyId, agentId }).then((r) => { if (live) setList(r as never); }).catch(() => undefined);
+    void load();
+    const timer = setInterval(load, 20_000);
+    return () => { live = false; clearInterval(timer); };
+  }, [companyId, agentId]);
+  return (
+    <div style={{ display: "grid", gap: 8 }}>
+      <div style={s.label}>Learned how-tos</div>
+      {!list?.length ? <div style={s.help}>Nothing yet. When you take over and do something, the agent gets your steps (never what you typed) and saves the ones worth keeping here.</div> : null}
+      {(list ?? []).map((h) => (
+        <div key={h.name} style={{ border: "1px solid rgba(127,127,127,.3)", borderRadius: 8, padding: "8px 12px" }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "baseline", cursor: "pointer" }} onClick={() => setOpen(open === h.name ? null : h.name)}>
+            <span style={{ fontWeight: 600 }}>{h.name}</span>
+            <span style={s.help}>{[h.site, h.learnedFrom ? `taught by ${h.learnedFrom}` : null, new Date(h.updatedAt).toLocaleDateString()].filter(Boolean).join(" · ")}</span>
+          </div>
+          {open === h.name ? <pre style={{ whiteSpace: "pre-wrap", fontSize: 12.5, margin: "8px 0 0" }}>{h.steps}</pre> : null}
+        </div>
+      ))}
     </div>
   );
 }

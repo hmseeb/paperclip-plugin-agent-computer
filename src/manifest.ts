@@ -6,7 +6,7 @@ const route = (routeKey: string, method: "GET" | "POST", path: string) => ({ rou
 const manifest: PaperclipPluginManifestV1 = {
   id: "agent-computer",
   apiVersion: 1,
-  version: "0.1.0",
+  version: "0.2.0",
   displayName: "Agent computer",
   description: "A browser per agent that keeps its logins. Watch it live from the Computers page, take over for logins and 2FA, and type passwords the agent never sees.",
   author: "Haseeb Azhar",
@@ -29,6 +29,13 @@ const manifest: PaperclipPluginManifestV1 = {
     route("scroll", "POST", "/pc/scroll"),
     route("ask-for-help", "POST", "/pc/ask-for-help"),
     route("ask-for-password", "POST", "/pc/ask-for-password"),
+    route("wait", "GET", "/pc/wait"),
+    route("browsers", "GET", "/pc/browsers"),
+    route("release", "POST", "/pc/release"),
+    route("howtos", "GET", "/pc/howtos"),
+    route("save-howto", "POST", "/pc/howtos"),
+    route("forget-howto", "POST", "/pc/howtos/forget"),
+    route("teach", "POST", "/pc/howtos/teach"),
   ],
   skills: [{ skillKey: "computer", displayName: "Agent computer", slug: "agent-computer", description: "Use a real browser that keeps your logins, and hand it to a person when needed.", markdown: SKILL }],
   ui: {
@@ -45,6 +52,12 @@ const manifest: PaperclipPluginManifestV1 = {
     properties: {
       computerUrl: { type: "string", title: "Computer URL", description: "Where Paperclip reaches the agent computer, e.g. http://agent-computer:4100" },
       computerToken: { format: "secret-ref", title: "Computer token", description: "A Paperclip secret holding the computer's COMPUTER_TOKEN." },
+      gatewayUrl: { type: "string", title: "Live screen gateway URL", description: "Where the plugin reads recorded steps from the gateway. Default http://agent-computer-gateway:4200" },
+      sharedBrowsers: {
+        type: "array", title: "Shared browsers",
+        description: "Named browsers several agents use, one at a time (e.g. one logged into GoHighLevel).",
+        items: { type: "object", properties: { id: { type: "string" }, name: { type: "string" }, agents: { type: "array", items: { type: "string" } }, sites: { type: "array", items: { type: "string" } } }, required: ["id", "name"] },
+      },
       sites: {
         type: "array", title: "Allowed sites per agent",
         description: "An agent listed here reaches only these sites (and their subdomains when written *.example.com). Agents not listed reach any site.",

@@ -18,7 +18,14 @@ function fake(answer: (path: string, body: unknown) => [number, unknown] = () =>
 }
 
 const deps = (computer: Computer, sites: Record<string, string[]> = {}, asked: unknown[] = []) => ({
-  computer, sites: (id: string) => sites[id] ?? [], needsPerson: async (...a: unknown[]) => { asked.push(a); },
+  computer,
+  browser: async (id: string, name: string) => (name ? { status: 403, error: "not assigned" } : { bot: id, label: "your browser", sites: sites[id] ?? [], shared: false }),
+  browsers: async () => [],
+  release: async () => false,
+  needsPerson: async (id: string, b: { bot: string }, kind: string, reason: string, url: string | null) => { asked.push([id, kind, reason, url]); },
+  takeDemonstration: async () => null,
+  howtos: { list: async () => [], save: async () => {}, forget: async () => false, teach: async () => null },
+  sleep: async () => {},
 });
 
 test("each agent drives its own browser; open sets which sites it may reach first", async () => {
@@ -51,7 +58,7 @@ test("while a person has the browser the agent is told to wait", async () => {
   const f = fake(() => [409, { error: "A person has control.", humanHasControl: true }]);
   const r = await handle(deps(f.computer), "a", "scroll", {});
   assert.equal(r.status, 409);
-  assert.match((r.body as { error: string }).error, /wait, then check \/pc\/status/);
+  assert.match((r.body as { error: string }).error, /call \/pc\/wait/);
 });
 
 test("asking for help or a password tells people, with the page it is on", async () => {
@@ -79,4 +86,51 @@ test("the address bar opens addresses and searches everything else", async () =>
   assert.equal(addressFor("app.gohighlevel.com/v2/location"), "https://app.gohighlevel.com/v2/location");
   assert.equal(addressFor("http://example.com"), "http://example.com");
   assert.equal(addressFor("localhost:3000"), "https://localhost:3000");
+});
+
+test("wait returns when the person hands back, with what they did, shown once", async () => {
+  let holder = "human";
+  const f = fake((p) => [200, p === "/control" ? { holder, requested: holder === "human" } : {}]);
+  let demo: unknown = { from: 1, to: 2, reason: "2FA", steps: ['1. Clicked button "Verify"'] };
+  const d = { ...deps(f.computer), takeDemonstration: async () => { const x = demo; demo = null; return x as never; } };
+  const still = await handle(d, "a", "wait", {});
+  assert.equal((still.body as { done: boolean }).done, false);
+  assert.equal((still.body as { personDid?: unknown }).personDid, undefined, "not while they still have it");
+  holder = "bot";
+  const done = (await handle(d, "a", "wait", {})).body as { done: boolean; personDid?: { steps: string[] } };
+  assert.equal(done.done, true);
+  assert.deepEqual(done.personDid?.steps, ['1. Clicked button "Verify"']);
+  const again = (await handle(d, "a", "status", {})).body as { personDid?: unknown };
+  assert.equal(again.personDid, undefined, "shown once");
+});
+
+test("a shared browser the agent is not assigned is refused before the computer is touched", async () => {
+  const f = fake();
+  const r = await handle(deps(f.computer), "a", "open", { url: "https://x.com", browser: "GoHighLevel" });
+  assert.equal(r.status, 403);
+  assert.equal(f.calls.length, 0);
+});
+
+test("how-tos are saved, listed, taught and forgotten through the agent's routes", async () => {
+  const saved: Record<string, { name: string; steps: string }[]> = {};
+  const d = { ...deps(fake().computer), howtos: {
+    list: async (id: string) => saved[id] ?? [],
+    save: async (id: string, h: { name: string; steps: string }) => { saved[id] = [...(saved[id] ?? []).filter((x) => x.name !== h.name), h]; },
+    forget: async (id: string, n: string) => { const b = (saved[id] ?? []).length; saved[id] = (saved[id] ?? []).filter((x) => x.name !== n); return saved[id].length < b; },
+    teach: async (id: string, n: string, to: string) => { const h = (saved[id] ?? []).find((x) => x.name === n); if (!h) return null; saved[to] = [h]; return to; },
+  } };
+  assert.equal((await handle(d, "a", "save-howto", { name: "Export contacts" })).status, 400, "steps required");
+  assert.equal((await handle(d, "a", "save-howto", { name: "Export contacts", steps: "1. Open contacts" })).status, 200);
+  assert.equal((await handle(d, "a", "teach", { name: "Export contacts", agent: "b" })).status, 200);
+  assert.deepEqual(((await handle(d, "b", "howtos", {})).body as { howtos: { name: string }[] }).howtos.map((h) => h.name), ["Export contacts"]);
+  assert.equal((await handle(d, "a", "forget-howto", { name: "Export contacts" })).status, 200);
+  assert.equal((await handle(d, "a", "teach", { name: "Export contacts", agent: "b" })).status, 404);
+});
+
+test("after a hand-back, opening a page takes the fresh look itself", async () => {
+  let looked = false;
+  const f = fake((p) => (p === "/snapshot" ? (looked = true, [200, {}]) : p === "/navigate" && !looked ? [409, { error: "Take a fresh browser snapshot after handback before acting.", snapshotRequired: true }] : [200, { title: "Example" }]));
+  const r = await handle(deps(f.computer), "a", "open", { url: "https://example.com" });
+  assert.equal(r.status, 200);
+  assert.deepEqual(f.calls.map((c) => c.path), ["/egress-policy", "/navigate", "/snapshot", "/navigate"]);
 });

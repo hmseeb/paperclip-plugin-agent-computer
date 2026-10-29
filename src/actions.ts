@@ -1,64 +1,140 @@
 // What an agent does with its computer, as plugin API routes only agents can call. Paperclip
-// checks which agent is calling, and the agent's id is the browser it gets, so an agent only
-// ever drives its own browser. Browser only: the computer's shell and files are not exposed.
+// checks which agent is calling. A call drives the agent's own browser, or a shared one the board
+// assigned to it (`browser`), leased to one agent at a time. Browser only: the computer's shell and
+// files are not exposed.
 import { ComputerError, egressFor, type Computer } from "./computer.ts";
+import type { Demonstration } from "./learning.ts";
+
+/** A browser a call runs in: `bot` is the computer's id for it. */
+export interface Browser { bot: string; label: string; sites: string[]; shared: boolean }
+export interface HowTo { name: string; site?: string; steps: string; notes?: string; updatedAt: string; learnedFrom?: string }
 
 export interface ActionDeps {
   computer: Computer;
-  /** Sites this agent may reach (settings); empty: any. */
-  sites(agentId: string): string[];
-  /** Tells people the agent needs them (the Mattermost plugin posts a Take over button). */
-  needsPerson(agentId: string, kind: "help" | "password", reason: string, url: string | null): Promise<void>;
+  /** The browser for this call, or the reason it is refused (not assigned, in use by another agent). */
+  browser(agentId: string, name: string): Promise<Browser | { status: number; error: string }>;
+  browsers(agentId: string): Promise<{ name: string; shared: boolean; inUseBy: string | null }[]>;
+  release(agentId: string, name: string): Promise<boolean>;
+  /** Tells people the agent needs them (the Mattermost plugin posts a Take over link). */
+  needsPerson(agentId: string, b: Browser, kind: "help" | "password", reason: string, url: string | null): Promise<void>;
+  /** The latest demonstration in this browser the agent has not been shown yet; marks it shown. */
+  takeDemonstration(bot: string, agentId: string): Promise<Demonstration | null>;
+  howtos: {
+    list(agentId: string): Promise<HowTo[]>;
+    save(agentId: string, h: HowTo): Promise<void>;
+    forget(agentId: string, name: string): Promise<boolean>;
+    /** Copies one to another agent of the company; returns its name, or null when there is no such agent. */
+    teach(agentId: string, name: string, to: string): Promise<string | null>;
+  };
+  sleep?: (ms: number) => Promise<void>;
 }
 
 type Result = { status: number; body: unknown };
 const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
 const num = (v: unknown) => (typeof v === "number" ? v : typeof v === "string" && v.trim() ? Number(v) : undefined);
+const ok = (body: unknown): Result => ({ status: 200, body });
+const bad = (status: number, error: string): Result => ({ status, body: { error } });
+const WAIT_MS = 20_000; // under the host's 30 s limit for one call
+
+type Control = { holder?: string; requested?: boolean; secretWanted?: string };
+const settled = (c: Control) => c.holder === "bot" && !c.requested && !c.secretWanted;
 
 export async function handle(d: ActionDeps, agentId: string, routeKey: string, input: Record<string, unknown>): Promise<Result> {
+  // Calls that are not about a browser.
+  switch (routeKey) {
+    case "browsers": return ok({ browsers: await d.browsers(agentId) });
+    case "howtos": return ok({ howtos: await d.howtos.list(agentId) });
+    case "save-howto": {
+      const name = str(input.name).slice(0, 80), steps = str(input.steps);
+      if (!name || !steps) return bad(400, "name and steps are required");
+      if (steps.length > 8000) return bad(400, "steps are too long (8000 characters at most)");
+      await d.howtos.save(agentId, { name, steps, site: str(input.site) || undefined, notes: str(input.notes).slice(0, 2000) || undefined, updatedAt: new Date().toISOString() });
+      return ok({ saved: name });
+    }
+    case "forget-howto": return (await d.howtos.forget(agentId, str(input.name))) ? ok({ forgotten: str(input.name) }) : bad(404, "no how-to by that name");
+    case "teach": {
+      const name = str(input.name), to = str(input.agent);
+      if (!name || !to) return bad(400, "name (the how-to) and agent (who to teach) are required");
+      const taught = await d.howtos.teach(agentId, name, to);
+      return taught ? ok({ taught: name, to: taught }) : bad(404, `no how-to "${name}", or no agent "${to}" in your company`);
+    }
+    case "release": {
+      return (await d.release(agentId, str(input.browser))) ? ok({ released: str(input.browser) }) : bad(409, "you do not hold that browser");
+    }
+  }
+
+  const b = await d.browser(agentId, str(input.browser));
+  if ("error" in b) return bad(b.status, b.error);
   const c = d.computer;
-  const act = (path: string, body: Record<string, unknown>) => c.call(agentId, "POST", path, body);
+  const act = (path: string, body: Record<string, unknown>) => c.call(b.bot, "POST", path, body);
+  // After a hand-back the computer wants a fresh look before any action. Opening a page, a key or a
+  // scroll names no element, so take that look for the agent rather than failing.
+  const freshly = async (path: string, body: Record<string, unknown>) => {
+    try { return await act(path, body); } catch (err) {
+      if (!(err instanceof ComputerError && err.body.snapshotRequired)) throw err;
+      await act("/snapshot", {});
+      return act(path, body);
+    }
+  };
+  const pageUrl = () => c.call<{ url?: string }>(b.bot, "GET", "/read").then((r) => r.url ?? null).catch(() => null);
   try {
+    let res: Result;
     switch (routeKey) {
       case "open": {
         const url = str(input.url);
-        if (!url) return { status: 400, body: { error: "url is required" } };
-        await c.egress(agentId, egressFor(d.sites(agentId))); // pushed each time: the computer forgets it on restart
-        return ok(await act("/navigate", { url }));
+        if (!url) return bad(400, "url is required");
+        await c.egress(b.bot, egressFor(b.sites)); // pushed each time: the computer forgets it on restart
+        res = ok(await freshly("/navigate", { url }));
+        break;
       }
-      case "read": return ok(await c.call(agentId, "GET", "/read"));
-      case "look": return ok(await act("/snapshot", {}));
-      case "click": return ok(await act("/click", { ref: str(input.ref), snapshotId: num(input.snapshotId) }));
-      case "type": return ok(await act("/type", { ref: str(input.ref), snapshotId: num(input.snapshotId), text: typeof input.text === "string" ? input.text : "", submit: input.submit === true || input.submit === "true" }));
-      case "key": return ok(await act("/key", { key: str(input.key), ...(str(input.ref) ? { ref: str(input.ref), snapshotId: num(input.snapshotId) } : {}) }));
-      case "scroll": return ok(await act("/scroll", { deltaY: num(input.deltaY) ?? 600 }));
-      case "screenshot": return ok(await c.call(agentId, "GET", "/screenshot"));
-      case "status": return ok(await c.call(agentId, "GET", "/control"));
+      case "read": res = ok(await c.call(b.bot, "GET", "/read")); break;
+      case "look": res = ok(await act("/snapshot", {})); break;
+      case "click": res = ok(await act("/click", { ref: str(input.ref), snapshotId: num(input.snapshotId) })); break;
+      case "type": res = ok(await act("/type", { ref: str(input.ref), snapshotId: num(input.snapshotId), text: typeof input.text === "string" ? input.text : "", submit: input.submit === true || input.submit === "true" })); break;
+      case "key": res = ok(await (str(input.ref) ? act : freshly)("/key", { key: str(input.key), ...(str(input.ref) ? { ref: str(input.ref), snapshotId: num(input.snapshotId) } : {}) })); break;
+      case "scroll": res = ok(await freshly("/scroll", { deltaY: num(input.deltaY) ?? 600 })); break;
+      case "screenshot": res = ok(await c.call(b.bot, "GET", "/screenshot")); break;
+      case "status": res = ok(await c.call(b.bot, "GET", "/control")); break;
       case "ask-for-help": {
         const reason = str(input.reason);
-        if (!reason) return { status: 400, body: { error: "say what you need a person to do (reason)" } };
+        if (!reason) return bad(400, "say what you need a person to do (reason)");
         const state = await act("/control/request", { reason });
-        const page = await c.call<{ url?: string }>(agentId, "GET", "/read").catch(() => ({ url: undefined }));
-        await d.needsPerson(agentId, "help", reason, page.url ?? null);
-        return ok({ ...state, note: "A person has been asked to take over. Check /pc/status; when you have control back, take a fresh look before acting." });
+        await d.needsPerson(agentId, b, "help", reason, await pageUrl());
+        return ok({ ...state, next: "A person has been asked. Now call /pc/wait (again until done is true): it returns when they hand the browser back, with the steps they took." });
       }
       case "ask-for-password": {
         const label = str(input.label) || "password";
         const state = await act("/control/secret", { ref: str(input.ref), snapshotId: num(input.snapshotId), label });
-        const page = await c.call<{ url?: string }>(agentId, "GET", "/read").catch(() => ({ url: undefined }));
-        await d.needsPerson(agentId, "password", `needs your ${label}`, page.url ?? null);
-        return ok({ ...state, note: "A person has been asked to type it into the field. You never see it. Check /pc/status until secretWanted is gone." });
+        await d.needsPerson(agentId, b, "password", `needs your ${label}`, await pageUrl());
+        return ok({ ...state, next: "A person has been asked to type it into the field; you never see it. Now call /pc/wait until done is true." });
       }
-      default: return { status: 404, body: { error: `unknown action ${routeKey}` } };
+      // Returns when the person is done (handed back, password entered) or after 20 s; call again until done.
+      case "wait": {
+        const sleep = d.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+        const end = Date.now() + WAIT_MS;
+        let state = await c.call<Control>(b.bot, "GET", "/control");
+        while (!settled(state) && Date.now() < end) {
+          await sleep(1000);
+          state = await c.call<Control>(b.bot, "GET", "/control");
+        }
+        if (!settled(state)) return ok({ done: false, holder: state.holder, next: "Still with a person. Call /pc/wait again." });
+        res = ok({ done: true, next: "The person is done. Take a fresh look (/pc/look) and carry on with the task; do not ask them to confirm." });
+        break;
+      }
+      default: return bad(404, `unknown action ${routeKey}`);
     }
+    // Whatever a person did in this browser since the agent last heard, so it can learn it.
+    const demo = await d.takeDemonstration(b.bot, agentId);
+    if (demo && res.body && typeof res.body === "object") {
+      res.body = { ...(res.body as object), personDid: { ...demo, next: "A person used this browser. If these steps do something you will need again, save them as a how-to (/pc/howtos), or update the one they correct." } };
+    }
+    return res;
   } catch (err) {
     if (err instanceof ComputerError) {
-      const hint = err.body.humanHasControl ? " A person has the browser right now; wait, then check /pc/status."
+      const hint = err.body.humanHasControl ? " A person has the browser right now; call /pc/wait."
         : err.body.stale || err.body.snapshotRequired ? " Take a fresh look (/pc/look) and use the new refs." : "";
       return { status: err.status === 499 ? 409 : err.status, body: { ...err.body, error: `${err.message}${hint}` } };
     }
-    return { status: 502, body: { error: `The computer is unreachable: ${String((err as Error)?.message ?? err).slice(0, 200)}` } };
+    return bad(502, `The computer is unreachable: ${String((err as Error)?.message ?? err).slice(0, 200)}`);
   }
 }
-
-const ok = (body: unknown): Result => ({ status: 200, body });

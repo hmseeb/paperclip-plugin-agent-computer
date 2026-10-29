@@ -2,7 +2,7 @@
 // asks the plugin for a ticket (agent, expiry, HMAC signature) and opens a websocket here; this
 // checks the ticket and pipes the socket to the computer's /stream with the token added. The
 // computer itself refuses input unless a person holds the browser. Run with Bun.
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
 const COMPUTER = (process.env.COMPUTER_URL ?? "http://agent-computer:4100").replace(/^http/, "ws").replace(/\/+$/, "");
 const TOKEN = process.env.COMPUTER_TOKEN ?? "";
@@ -37,15 +37,39 @@ type Client = Bun.ServerWebSocket<Data>;
 interface Shared { upstream: WebSocket; clients: Set<Client>; last?: string; queue: string[] }
 const streams = new Map<string, Shared>();
 
+/**
+ * What people did in each browser, for the plugin to turn into how-tos. The computer's recorder
+ * describes a gesture (which element, which page) and never what was typed; the stream is opened
+ * with a recording id so it does. Kept two hours, in memory.
+ */
+const steps = new Map<string, { at: number }[]>();
+const KEEP_MS = 2 * 60 * 60_000;
+function record(agent: string, action: unknown) {
+  const list = steps.get(agent) ?? [];
+  const now = Date.now();
+  list.push({ at: now, ...(action as object) });
+  while (list.length && (list.length > 2000 || list[0].at < now - KEEP_MS)) list.shift();
+  steps.set(agent, list);
+}
+const bearer = (req: Request) => {
+  const got = Buffer.from((req.headers.get("authorization") ?? "").replace(/^Bearer /, ""));
+  const want = Buffer.from(TOKEN);
+  return got.length === want.length && timingSafeEqual(got, want);
+};
+
 function join(ws: Client) {
   const agent = ws.data.agent;
   let s = streams.get(agent);
   if (!s) {
-    const upstream = new WebSocket(`${COMPUTER}/stream?token=${encodeURIComponent(TOKEN)}&bot=${encodeURIComponent(agent)}`);
+    const upstream = new WebSocket(`${COMPUTER}/stream?token=${encodeURIComponent(TOKEN)}&bot=${encodeURIComponent(agent)}&recording=${randomUUID()}`);
     const shared: Shared = { upstream, clients: new Set(), queue: [] };
     upstream.onopen = () => { for (const m of shared.queue.splice(0)) upstream.send(m); };
     upstream.onmessage = (m) => {
       const data = String(m.data);
+      if (data.startsWith('{"type":"demonstration.action"')) {
+        try { record(agent, JSON.parse(data).action); } catch { /* malformed: skip */ }
+        return;
+      }
       const frame = data.startsWith('{"type":"frame"');
       if (frame) shared.last = data;
       for (const c of shared.clients) {
@@ -82,6 +106,13 @@ Bun.serve<Data>({
   fetch(req, server) {
     const url = new URL(req.url);
     if (url.pathname === "/_computer/health") return new Response("ok");
+    // The plugin reading recorded steps. Public path, so it needs the computer's own token.
+    if (url.pathname === "/_computer/steps") {
+      if (!bearer(req)) return new Response("Not authorised.", { status: 401 });
+      const since = Number(url.searchParams.get("since") ?? 0);
+      const list = (steps.get(url.searchParams.get("agent") ?? "") ?? []).filter((x) => x.at >= since);
+      return Response.json({ steps: list });
+    }
     if (url.pathname !== "/_computer/stream") return new Response("Not found", { status: 404 });
     const agent = url.searchParams.get("agent") ?? "";
     if (!validTicket(KEY, agent, url.searchParams.get("exp") ?? "", url.searchParams.get("sig") ?? "")) {
