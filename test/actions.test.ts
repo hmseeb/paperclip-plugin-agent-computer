@@ -70,3 +70,13 @@ test("an unreachable computer is reported, an unknown call is a 404", async () =
   assert.equal((await handle(deps(down), "a", "read", {})).status, 502);
   assert.equal((await handle(deps(fake().computer), "a", "exec", {})).status, 404, "the shell is not exposed");
 });
+
+test("the address bar opens addresses and searches everything else", async () => {
+  const { addressFor } = await import("../src/computer.ts");
+  assert.equal(addressFor("Highlevel"), "https://www.google.com/search?q=Highlevel");
+  assert.equal(addressFor("gohighlevel login"), "https://www.google.com/search?q=gohighlevel%20login");
+  assert.equal(addressFor("gohighlevel.com"), "https://gohighlevel.com");
+  assert.equal(addressFor("app.gohighlevel.com/v2/location"), "https://app.gohighlevel.com/v2/location");
+  assert.equal(addressFor("http://example.com"), "http://example.com");
+  assert.equal(addressFor("localhost:3000"), "https://localhost:3000");
+});

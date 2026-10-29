@@ -8,6 +8,9 @@ chrome a person driving it needs:
 - `POST /human/navigate {url}`, `POST /human/history {action: back|forward|reload}`,
   `POST /human/tabs {action: select|new|close, index}`: only while a person holds the browser.
 - A tab the person switches to stays the live one until it closes or the site opens a new window.
+- Each browser gets its own egress-filter port instead of proxy credentials: with credentials,
+  Chromium stalled on Google (search never loaded); the port identifies the agent instead.
+- `SCREENCAST_QUALITY` sets the live screen's JPEG quality (Greg's mini: 40).
 
 On Greg's mini the source and patch live in `~/paperclip/agent-computer/`, and `compose.yml` runs the
 image `agent-computer:cd161d0-human1` plus `agent-computer-gateway` (`../gateway/gateway.ts`).

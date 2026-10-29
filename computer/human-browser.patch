@@ -1,8 +1,131 @@
+diff --git a/agent-computer/src/egress.ts b/agent-computer/src/egress.ts
+index bd651d3..a5e1d5c 100644
+--- a/agent-computer/src/egress.ts
++++ b/agent-computer/src/egress.ts
+@@ -55,6 +55,8 @@ export function egressFor(
+    * configured upstream itself, so the per-Bot address the far side sees is unchanged.
+    */
+   if (filter) {
++    const own = filter.botPorts.get(botId);
++    if (own) return { server: `http://127.0.0.1:${own.port}` };
+     return {
+       server: `http://127.0.0.1:${filter.port}`,
+       username: botId,
+@@ -487,7 +489,15 @@ export function needsResolution(policy: EgressPolicy, host: string): boolean {
+ 
+ /* --------------------------------- the filter on the computer --------------------------------- */
+ 
+-type RunningFilter = { port: number; secret: string; server: Server };
++type RunningFilter = {
++  port: number;
++  secret: string;
++  server: Server;
++  /** Builds a listener for one Bot, identified by the port instead of proxy credentials. */
++  serve: (fixedBot?: string) => Server;
++  /** Each browser's own port. See `egressPortFor`. */
++  botPorts: Map<string, { port: number; server: Server }>;
++};
+ let filter: RunningFilter | null = null;
+ const policies = new Map<string, EgressPolicy>();
+ let policyRequired = true;
+@@ -819,6 +829,7 @@ export async function startEgressFilter(
+   }
+   const secret = randomBytes(24).toString("base64url");
+ 
++  const serve = (fixedBot?: string): Server => {
+   const server = createServer(async (request, response) => {
+     // A plain-HTTP request through a proxy names the absolute URL.
+     let target: URL;
+@@ -828,7 +839,7 @@ export async function startEgressFilter(
+       response.writeHead(400).end("A proxy request names an absolute URL.");
+       return;
+     }
+-    const botId = botFromProxyAuthorization(
++    const botId = fixedBot ?? botFromProxyAuthorization(
+       request.headers["proxy-authorization"] as string | undefined,
+       secret,
+     );
+@@ -854,7 +865,7 @@ export async function startEgressFilter(
+     async (request: IncomingMessage, client: Socket, head: Buffer) => {
+       const [host = "", portText = "443"] = splitHostPort(request.url ?? "");
+       const port = Number(portText);
+-      const botId = botFromProxyAuthorization(
++      const botId = fixedBot ?? botFromProxyAuthorization(
+         request.headers["proxy-authorization"] as string | undefined,
+         secret,
+       );
+@@ -889,6 +900,9 @@ export async function startEgressFilter(
+       );
+     },
+   );
++  return server;
++  };
++  const server = serve();
+ 
+   await new Promise<void>((resolve, reject) => {
+     server.once("error", reject);
+@@ -896,7 +910,7 @@ export async function startEgressFilter(
+   });
+   const address = server.address();
+   const port = typeof address === "object" && address ? address.port : 0;
+-  filter = { port, secret, server };
++  filter = { port, secret, server, serve, botPorts: new Map() };
+ 
+   const url = `http://127.0.0.1:${port}`;
+   if (options.forShell) shellProxy = url;
+@@ -909,10 +923,35 @@ export async function stopEgressFilter(): Promise<void> {
+   shellProxy = null;
+   policies.clear();
+   if (running) {
++    for (const own of running.botPorts.values()) own.server.close();
+     await new Promise<void>((resolve) => running.server.close(() => resolve()));
+   }
+ }
+ 
++/**
++ * Give one Bot's browser a filter port of its own, so the browser needs no proxy credentials.
++ *
++ * Chromium given a proxy username and password (Playwright answers the proxy's auth through the
++ * DevTools Fetch domain) stalls on some sites: Google search never finished loading, while the same
++ * proxy without credentials loads it in under a second. The port names the Bot instead. It listens on
++ * loopback inside the computer only, the same reach the shared port has.
++ */
++export async function egressPortFor(botId: string): Promise<number | null> {
++  const running = filter;
++  if (!running) return null;
++  const known = running.botPorts.get(botId);
++  if (known) return known.port;
++  const server = running.serve(botId);
++  await new Promise<void>((resolve, reject) => {
++    server.once("error", reject);
++    server.listen(0, "127.0.0.1", () => resolve());
++  });
++  const address = server.address();
++  const port = typeof address === "object" && address ? address.port : 0;
++  running.botPorts.set(botId, { port, server });
++  return port;
++}
++
+ /** `URL.hostname` keeps an IPv6 address's brackets, and a socket given them looks the name up. */
+ function unbracketed(hostname: string): string {
+   return hostname.replace(/^\[|\]$/g, "");
 diff --git a/agent-computer/src/index.ts b/agent-computer/src/index.ts
-index b6640d1..f056ffe 100644
+index b6640d1..15e91d6 100644
 --- a/agent-computer/src/index.ts
 +++ b/agent-computer/src/index.ts
-@@ -1000,6 +1000,62 @@ serve<StreamData>({
+@@ -597,7 +597,10 @@ serve<StreamData>({
+         const attach = async () => {
+           const target = await currentPage(ws.data.botId);
+           if (target === casting) return;
+-          const cast = await startScreencast(target, send);
++          // JPEG quality of the live screen, lower for viewers on a slow link (default 70).
++          const cast = await startScreencast(target, send, {
++            quality: Number(process.env.SCREENCAST_QUALITY) || undefined,
++          });
+           // The claim stops a cast it refuses, so a launch that lost the screen leaks nothing.
+           if (!(await claim.install(cast))) return;
+           casting = target;
+@@ -1000,6 +1003,62 @@ serve<StreamData>({
          return json(session.control.release(body.requestId));
        }
  
@@ -66,9 +189,18 @@ index b6640d1..f056ffe 100644
        // person addresses them by pointing, because they are looking at a picture. Different problem,
        // different endpoint, and only usable while they hold the wheel.
 diff --git a/agent-computer/src/profiles.ts b/agent-computer/src/profiles.ts
-index 3aeb838..f8793bc 100644
+index 3aeb838..f817d9d 100644
 --- a/agent-computer/src/profiles.ts
 +++ b/agent-computer/src/profiles.ts
+@@ -39,7 +39,7 @@ import { type BrowserContext, chromium, type Page } from "playwright";
+ import { profileDirectoryFor } from "./bot-id";
+ import { chooseEvictions, chooseIdle } from "./browser-eviction";
+ import { browserRuntimeFromEnv } from "./browser-runtime";
+-import { egressFor, egressLabel } from "./egress";
++import { egressFor, egressLabel, egressPortFor } from "./egress";
+ import { numberFromEnv, settleWithin } from "./env";
+ import { chooseLivePage } from "./live-page";
+ import { attachBrowserNetwork, attachPageNetwork } from "./page-network";
 @@ -273,6 +273,8 @@ export type BrowserClosed = (botId: string) => void | Promise<void>;
  
  export function createProfiles(root: string, onClosed: BrowserClosed) {
@@ -78,7 +210,15 @@ index 3aeb838..f8793bc 100644
      context: BrowserContext;
      page: Page;
      startedAt: string;
-@@ -536,7 +538,11 @@ export function createProfiles(root: string, onClosed: BrowserClosed) {
+@@ -472,6 +474,7 @@ export function createProfiles(root: string, onClosed: BrowserClosed) {
+           await sweepLocks(dir);
+           await keepWebRtcInsideProxy(dir);
+         }
++        await egressPortFor(botId);
+         const proxy = egressFor(botId, process.env);
+         const context = await chromium.launchPersistentContext(dir, {
+           channel: BROWSER_RUNTIME.channel,
+@@ -536,7 +539,11 @@ export function createProfiles(root: string, onClosed: BrowserClosed) {
            ...(sessionCookies ? { sessionCookies } : {}),
          };
          record.retarget = () => {
@@ -91,7 +231,7 @@ index 3aeb838..f8793bc 100644
            if (!next || next === record.page) return;
            record.page = next;
            console.info(
-@@ -551,6 +557,7 @@ export function createProfiles(root: string, onClosed: BrowserClosed) {
+@@ -551,6 +558,7 @@ export function createProfiles(root: string, onClosed: BrowserClosed) {
          // in a new window is neither shown to the person taking the wheel nor reachable by input.
          context.on("page", (opened) => {
            if (!LOCAL_CHROME) void attachPageNetwork(context, opened, network);
@@ -99,7 +239,7 @@ index 3aeb838..f8793bc 100644
            record.retarget();
            // A popup closes itself when it succeeds, and the record must move back to the opener
            // rather than leave a closed page to be read as a dead browser.
-@@ -582,6 +589,39 @@ export function createProfiles(root: string, onClosed: BrowserClosed) {
+@@ -582,6 +590,39 @@ export function createProfiles(root: string, onClosed: BrowserClosed) {
       * repeating it: a request is one more reason a browser closes, not a different kind of closing,
       * and anything watching has to come down either way.
       */

@@ -54,3 +54,11 @@ export function egressFor(sites: string[] | undefined): Egress {
   const domains = (sites ?? []).map((s) => s.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "")).filter(Boolean);
   return domains.length ? { mode: "allowlist_only", rules: domains.map((value) => ({ type: "domain", value })) } : { mode: "allow_all", rules: [] };
 }
+
+/** What the address bar opens: an address as typed, anything else searched on Google. */
+export function addressFor(input: string): string {
+  const v = input.trim();
+  if (/^https?:\/\//i.test(v)) return v;
+  if (!/\s/.test(v) && /^(localhost|[\w-]+(\.[\w-]+)+)(:\d+)?(\/.*)?$/i.test(v)) return `https://${v}`;
+  return `https://www.google.com/search?q=${encodeURIComponent(v)}`;
+}

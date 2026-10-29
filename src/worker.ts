@@ -1,7 +1,7 @@
 import { definePlugin, runWorker, type PluginContext } from "@paperclipai/plugin-sdk";
 import { createHmac } from "node:crypto";
 import { handle } from "./actions.ts";
-import { Computer, egressFor } from "./computer.ts";
+import { addressFor, Computer, egressFor } from "./computer.ts";
 import { HELP } from "./help.ts";
 
 let ctx: PluginContext;
@@ -118,7 +118,7 @@ const plugin = definePlugin({
       const url = typeof params.url === "string" ? params.url.trim() : "";
       if (!url) throw new Error("Type an address.");
       await hold(t, agent.id);
-      return t.computer.call(agent.id, "POST", "/human/navigate", { url: /^[a-z]+:\/\//i.test(url) ? url : `https://${url}` });
+      return t.computer.call(agent.id, "POST", "/human/navigate", { url: addressFor(url) });
     });
     ctx.actions.register("history", async (params, context) => {
       person(context);

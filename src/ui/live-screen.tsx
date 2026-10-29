@@ -78,7 +78,8 @@ export function LiveScreen({ ticket, driving, onProblem }: Props) {
         if (!m || typeof m !== "object" || typeof m.type !== "string") return;
         if (m.type === "error") {
           // Input sent a moment before control arrived, or after it left: not worth showing.
-          if (!/take control|has control|hand it back/i.test(m.error ?? "")) onProblem(m.error ?? "Couldn't show the screen.");
+          // "Target page … closed": input that raced a tab change; the stream follows the new tab within a second.
+          if (!/take control|has control|hand it back|has been closed|still starting|no longer live/i.test(m.error ?? "")) onProblem(m.error ?? "Couldn't show the screen.");
           return;
         }
         if (m.type !== "frame" || typeof m.data !== "string" || m.data.length > 20_000_000) return;
@@ -86,7 +87,8 @@ export function LiveScreen({ ticket, driving, onProblem }: Props) {
         if (!(width > 0 && height > 0 && width <= 8192 && height <= 8192)) return;
         attempts = 0;
         frameSize.current = { width, height };
-        void draw(m.data, ++latestId.current);
+        // Acknowledged once drawn: the gateway sends the next frame only then (flow control).
+        void draw(m.data, ++latestId.current).finally(() => { if (socket.readyState === WebSocket.OPEN) socket.send('{"type":"ack"}'); });
       };
       socket.onclose = () => {
         if (socketRef.current !== socket) return;
@@ -118,6 +120,21 @@ export function LiveScreen({ ticket, driving, onProblem }: Props) {
     if (driving && s?.readyState === WebSocket.OPEN) s.send(JSON.stringify(message));
   }, [driving]);
 
+  // Mouse moves and wheel steps arrive far faster than the screen can show them over a slow link;
+  // send at most one of each per animation frame, the wheel summed, so input never queues up.
+  const pendingMove = useRef<Record<string, unknown> | null>(null);
+  const pendingWheel = useRef<{ x: number; y: number; deltaX: number; deltaY: number; modifiers: number } | null>(null);
+  const scheduled = useRef(false);
+  const flushSoon = useCallback(() => {
+    if (scheduled.current) return;
+    scheduled.current = true;
+    requestAnimationFrame(() => {
+      scheduled.current = false;
+      if (pendingMove.current) { send(pendingMove.current); pendingMove.current = null; }
+      if (pendingWheel.current) { send({ type: "wheel", ...pendingWheel.current }); pendingWheel.current = null; }
+    });
+  }, [send]);
+
   const at = useCallback((e: { clientX: number; clientY: number }) => {
     const canvas = canvasRef.current, size = frameSize.current;
     if (!canvas || !size) return null;
@@ -129,14 +146,18 @@ export function LiveScreen({ ticket, driving, onProblem }: Props) {
   const onMouse = useCallback((kind: "pressed" | "released" | "moved") => (e: React.MouseEvent<HTMLCanvasElement>) => {
     const p = at(e);
     if (!p) return;
-    send({
+    const message = {
       type: "mouse", event: kind, ...p,
       button: e.button === 2 ? "right" : e.button === 1 ? "middle" : "left",
       // The browser's own click count, so double clicks arrive as double clicks.
       clickCount: kind === "moved" ? 0 : Math.max(1, e.detail),
       modifiers: modifierBits(e),
-    });
-  }, [at, send]);
+    };
+    if (kind === "moved") { pendingMove.current = message; flushSoon(); return; }
+    // A press or release goes now, after any move still waiting, so it lands where the pointer is.
+    if (pendingMove.current) { send(pendingMove.current); pendingMove.current = null; }
+    send(message);
+  }, [at, send, flushSoon]);
 
   // Keys on window (a canvas cannot hold focus), in the capture phase so Paperclip's own shortcuts don't also fire.
   useEffect(() => {
@@ -180,11 +201,13 @@ export function LiveScreen({ ticket, driving, onProblem }: Props) {
       const p = at(e);
       if (!p) return;
       e.preventDefault();
-      send({ type: "wheel", ...p, deltaX: e.deltaX, deltaY: e.deltaY, modifiers: modifierBits(e) });
+      const w = pendingWheel.current;
+      pendingWheel.current = { ...p, deltaX: (w?.deltaX ?? 0) + e.deltaX, deltaY: (w?.deltaY ?? 0) + e.deltaY, modifiers: modifierBits(e) };
+      flushSoon();
     };
     canvas.addEventListener("wheel", wheel, { passive: false });
     return () => canvas.removeEventListener("wheel", wheel);
-  }, [driving, connected, at, send]);
+  }, [driving, connected, at, flushSoon]);
 
   return (
     <canvas

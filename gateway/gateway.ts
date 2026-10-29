@@ -10,6 +10,7 @@ if (!TOKEN) throw new Error("COMPUTER_TOKEN is required");
 export const ticketKey = (token: string) => createHmac("sha256", token).update("agent-computer stream tickets").digest();
 const KEY = ticketKey(TOKEN);
 const MAX_AGE_S = 120;
+const WINDOW = 2;
 
 export function validTicket(key: Buffer, agent: string, exp: string, sig: string, now = Date.now() / 1000): boolean {
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(agent) || !/^\d{10}$/.test(exp)) return false;
@@ -19,7 +20,13 @@ export function validTicket(key: Buffer, agent: string, exp: string, sig: string
   return sig.length === want.length && timingSafeEqual(Buffer.from(sig), Buffer.from(want));
 }
 
-type Data = { agent: string };
+/**
+ * Flow control per viewer: the page acknowledges every frame it draws, and at most `WINDOW` frames
+ * are unacknowledged at once. A newer frame replaces the one waiting (`pending`). Without this the
+ * frames queued up inside the tunnel, out of sight of any buffer check here, and the screen trailed
+ * a scroll by seconds; now it is at most one round trip behind.
+ */
+type Data = { agent: string; pending?: string; inFlight: number };
 type Client = Bun.ServerWebSocket<Data>;
 
 /**
@@ -39,8 +46,13 @@ function join(ws: Client) {
     upstream.onopen = () => { for (const m of shared.queue.splice(0)) upstream.send(m); };
     upstream.onmessage = (m) => {
       const data = String(m.data);
-      if (data.startsWith('{"type":"frame"')) shared.last = data;
-      for (const c of shared.clients) c.send(data);
+      const frame = data.startsWith('{"type":"frame"');
+      if (frame) shared.last = data;
+      for (const c of shared.clients) {
+        if (!frame) c.send(data);
+        else if (c.data.inFlight >= WINDOW) c.data.pending = data;
+        else { c.data.inFlight++; c.send(data); }
+      }
     };
     const end = () => {
       if (streams.get(agent) === shared) streams.delete(agent);
@@ -52,7 +64,7 @@ function join(ws: Client) {
     s = shared;
   }
   s.clients.add(ws);
-  if (s.last) ws.send(s.last);
+  if (s.last) { ws.data.inFlight++; ws.send(s.last); }
 }
 
 function leave(ws: Client) {
@@ -75,7 +87,7 @@ Bun.serve<Data>({
     if (!validTicket(KEY, agent, url.searchParams.get("exp") ?? "", url.searchParams.get("sig") ?? "")) {
       return new Response("This link has expired. Reload the page.", { status: 403 });
     }
-    if (server.upgrade(req, { data: { agent } })) return undefined;
+    if (server.upgrade(req, { data: { agent, inFlight: 0 } })) return undefined;
     return new Response("Expected a websocket.", { status: 400 });
   },
   websocket: {
@@ -86,6 +98,12 @@ Bun.serve<Data>({
       const s = streams.get(ws.data.agent);
       if (!s) return;
       const text = typeof m === "string" ? m : m.toString();
+      if (text === '{"type":"ack"}') {
+        ws.data.inFlight = Math.max(0, ws.data.inFlight - 1);
+        const p = ws.data.pending;
+        if (p) { ws.data.pending = undefined; ws.data.inFlight++; ws.send(p); }
+        return;
+      }
       if (s.upstream.readyState === WebSocket.OPEN) s.upstream.send(text);
       else if (s.queue.length < 50) s.queue.push(text);
     },
