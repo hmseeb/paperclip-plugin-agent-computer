@@ -1,0 +1,12 @@
+{
+  "name": "paperclip-plugin-computer",
+  "version": "0.1.0",
+  "description": "Paperclip agents get a real browser that keeps their logins. Watch it live, take over for logins and 2FA, and type passwords the agent never sees.",
+  "type": "module",
+  "license": "MIT",
+  "paperclipPlugin": { "manifest": "./dist/manifest.js", "worker": "./dist/worker.js", "ui": "./dist/ui/" },
+  "scripts": { "build": "node build.mjs", "test": "node --test test/*.test.ts" },
+  "engines": { "node": ">=24.11.0" },
+  "author": "Haseeb Azhar",
+  "files": ["dist", "README.md", "LICENSE"]
+}
