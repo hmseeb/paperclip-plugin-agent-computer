@@ -10,6 +10,7 @@ const errText = (err: unknown) => String((err as Error)?.message ?? err);
 // Every company's settings, kept so a worker restarted without a config replay still serves them.
 const BOOT = { scopeKind: "instance" as const, namespace: "computer", stateKey: "boot" };
 const DEMO_FRESH_MS = 24 * 60 * 60_000;
+const NEW_TAB_PAGE = "https://www.google.com/";
 
 interface Tenant {
   computer: Computer;
@@ -270,12 +271,18 @@ const plugin = definePlugin({
       await hold(t, bot, sites);
       const action = String(params.action);
       const index = typeof params.index === "number" ? params.index : undefined;
+      // A new tab opens Google, as a browser's start page would, rather than a blank page.
+      const newTab = async () => {
+        await t.computer.call(bot, "POST", "/human/tabs", { action: "new" });
+        return t.computer.call<{ url?: string }>(bot, "POST", "/human/navigate", { url: NEW_TAB_PAGE }, 45_000)
+          .catch(() => ({ url: "about:blank" })); // a slow or blocked Google still leaves the tab open
+      };
       if (action === "close") {
         // Closing the last tab leaves a blank one, as a browser window would, rather than refusing.
         const { tabs } = await t.computer.call<{ tabs: unknown[] }>(bot, "GET", "/tabs");
-        if (tabs.length <= 1) await t.computer.call(bot, "POST", "/human/tabs", { action: "new" });
+        if (tabs.length <= 1) await newTab();
       }
-      const r = await t.computer.call<{ url?: string }>(bot, "POST", "/human/tabs", { action, index });
+      const r = action === "new" ? await newTab() : await t.computer.call<{ url?: string }>(bot, "POST", "/human/tabs", { action, index });
       chromeStep(t, bot, { at: Date.now(), kind: action === "new" ? "new-tab" : action === "close" ? "close-tab" : "switch-tab", url: r.url });
       return r;
     });
