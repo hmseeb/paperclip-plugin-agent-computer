@@ -30,6 +30,9 @@ them with your Paperclip API credentials:
   waits up to 20 seconds. Do not end your turn and do not ask the person to tell you they are done:
   handing the computer back is how they say it. Then look again and carry on with the task.
   \`for i in $(seq 1 45); do r=$(curl -s "\${H[@]}" "$B/wait"); echo "$r" | jq -e .done >/dev/null && break; done; echo "$r"\`
+- **If someone writes to you meanwhile** (in the Mattermost thread you are working in), **wait** returns
+  early with \`personWrote\`: read the message (GET …/api/plugins/mattermost-bridge/api/mm/inbox) and do
+  what it says. If they no longer need you at the computer, POST **cancel-help** to withdraw your request.
 - **A password or secret for a field:** look, then call **ask-for-password** with the field's
   \`ref\`, \`snapshotId\` and a \`label\` ("GoHighLevel password"), then **wait** the same way. A person
   types it straight into the field; you never see it. Never ask for passwords in chat, and never type
@@ -72,6 +75,7 @@ GET  /read
 GET  /screenshot
 POST /ask-for-help      {"reason":"Log in to GoHighLevel, I hit 2FA"}
 POST /ask-for-password  {"ref","snapshotId","label"}
+POST /cancel-help             withdraws your request for a person
 GET  /howtos                     what people have shown you
 POST /howtos            {"name","site","steps","notes"}   save or update one
 POST /howtos/forget     {"name"}

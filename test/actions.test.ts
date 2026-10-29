@@ -159,3 +159,19 @@ test("with the fallback set to stop, a dead proxy is reported instead of going o
   assert.match((r.body as { error: string }).error, /"US residential" is not working.*not to go out without it/);
   assert.equal(navigations, 1, "no direct retry");
 });
+
+test("steering: a message from a person ends the computer wait, and the agent can withdraw its request", async () => {
+  let wrote = false, cancelled = "";
+  const f = fake((p, body) => {
+    if (p === "/control") return [200, { holder: "bot", requested: true, request: { id: "req-1" } }];
+    if (p === "/control/cancel") { cancelled = (body as { requestId: string }).requestId; return [200, {}]; }
+    return [200, {}];
+  });
+  const d = { ...deps(f.computer), steered: () => { const w = wrote; wrote = false; return w; }, sleep: async () => { wrote = true; } };
+  const r = (await handle(d, "a", "wait", {})).body as { done: boolean; personWrote?: boolean; next: string };
+  assert.equal(r.done, false);
+  assert.equal(r.personWrote, true);
+  assert.match(r.next, /mm\/inbox/);
+  assert.deepEqual((await handle(d, "a", "cancel-help", {})).body, { cancelled: true });
+  assert.equal(cancelled, "req-1");
+});

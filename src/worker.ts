@@ -25,6 +25,8 @@ interface Tenant {
   chrome: Map<string, Step[]>;
   /** Open help and password requests, for the overlay, and when each computer was last used by its agent. */
   pending: Map<string, { agentId: string; agentName: string; computer: string | null; kind: string; reason: string; at: number }>;
+  /** Agents a person wrote to in Mattermost while they were busy, not yet told (steering). */
+  steered: Set<string>;
   lastUsed: Map<string, number>;
   /** Named proxies, and how each did when last checked. A proxy that is down is skipped (direct) until it is back. */
   proxies: Map<string, { name: string; url: string }>;
@@ -84,7 +86,7 @@ async function start(companyId: string, config: Record<string, unknown>): Promis
     gatewayUrl: (typeof config.gatewayUrl === "string" && config.gatewayUrl.trim()) || "http://agent-computer-gateway:4200",
     // Leases and takeovers survive a settings save.
     leases: old?.leases ?? new Leases(), takenAt: old?.takenAt ?? new Map(), chrome: old?.chrome ?? new Map(),
-    pending: old?.pending ?? new Map(), lastUsed: old?.lastUsed ?? new Map(),
+    pending: old?.pending ?? new Map(), lastUsed: old?.lastUsed ?? new Map(), steered: old?.steered ?? new Set(),
     proxies, proxyHealth, proxyFor, fallback, timers: proxies.size ? [setInterval(() => void checkAll(), PROXY_CHECK_MS)] : [],
     // Signs live-screen tickets; gateway/gateway.ts derives the same key from the same token.
     ticketKey: createHmac("sha256", token).update("agent-computer stream tickets").digest(),
@@ -145,6 +147,11 @@ const plugin = definePlugin({
       return { connected: h.startsWith("Connected"), status: h, proxies, fallback: t.fallback };
     });
     ctx.actions.register("skill", async (params) => ({ key: await ensureSkill(String(params.companyId)) }));
+    // Steering from the Mattermost plugin: a person wrote to an agent mid-run; its computer wait ends early.
+    ctx.events.on("plugin.mattermost-bridge.person-wrote", async (e) => {
+      const agentId = (e.payload as { agentId?: string } | undefined)?.agentId;
+      if (agentId) tenants.get(e.companyId)?.steered.add(agentId);
+    });
     // Settings: try a proxy, a pasted URL before it is saved or a saved one by id.
     ctx.actions.register("test-proxy", async (params, context) => {
       if (context.actor.type !== "user") throw new Error("Only people can test proxies.");
@@ -361,6 +368,7 @@ const plugin = definePlugin({
     const body = input.body && typeof input.body === "object" && !Array.isArray(input.body) ? (input.body as Record<string, unknown>) : {};
     const res = await handle({
       computer: t.computer,
+      steered: (id) => t.steered.delete(id),
       async pick(id, name) {
         if (!name) { t.lastUsed.set(id, Date.now()); return { bot: id, label: "your computer", sites: t.sites.get(id) ?? [], shared: false }; }
         const b = findShared(t, name);

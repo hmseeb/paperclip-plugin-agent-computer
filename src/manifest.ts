@@ -6,14 +6,14 @@ const route = (routeKey: string, method: "GET" | "POST", path: string) => ({ rou
 const manifest: PaperclipPluginManifestV1 = {
   id: "agent-computer",
   apiVersion: 1,
-  version: "0.5.1",
+  version: "0.6.0",
   displayName: "Agent computer",
   description: "A computer per agent that keeps its logins, plus shared computers. Watch them live on the Computers page, take over for logins and 2FA, type passwords the agent never sees, and teach agents by doing.",
   author: "Haseeb Azhar",
   categories: ["connector"],
   capabilities: [
     "agents.read", "companies.read", "secrets.read-ref", "http.outbound", "plugin.state.read", "plugin.state.write",
-    "api.routes.register", "skills.managed", "events.emit", "instance.settings.register", "ui.page.register", "ui.sidebar.register", "ui.action.register",
+    "api.routes.register", "skills.managed", "events.emit", "events.subscribe", "instance.settings.register", "ui.page.register", "ui.sidebar.register", "ui.action.register",
   ],
   entrypoints: { worker: "./dist/worker.js", ui: "./dist/ui" },
   apiRoutes: [
@@ -30,6 +30,7 @@ const manifest: PaperclipPluginManifestV1 = {
     route("ask-for-help", "POST", "/pc/ask-for-help"),
     route("ask-for-password", "POST", "/pc/ask-for-password"),
     route("wait", "GET", "/pc/wait"),
+    route("cancel-help", "POST", "/pc/cancel-help"),
     route("computers", "GET", "/pc/computers"),
     route("release", "POST", "/pc/release"),
     route("howtos", "GET", "/pc/howtos"),

@@ -27,6 +27,8 @@ export interface ActionDeps {
     teach(agentId: string, name: string, to: string): Promise<string | null>;
   };
   sleep?: (ms: number) => Promise<void>;
+  /** True once when a person has written to this agent in Mattermost since it last heard (steering). */
+  steered?(agentId: string): boolean;
   /**
    * A page failed on a computer with a proxy: true when the proxy is down and calls now go direct (retry);
    * `{ stopped }` when it is down and the settings say not to go out without it.
@@ -119,6 +121,14 @@ export async function handle(d: ActionDeps, agentId: string, routeKey: string, i
       case "scroll": res = ok(await freshly("/scroll", { deltaY: num(input.deltaY) ?? 600 })); break;
       case "screenshot": res = ok(await c.call(b.bot, "GET", "/screenshot")); break;
       case "status": res = ok(await c.call(b.bot, "GET", "/control")); break;
+      // Withdraws the agent's own request for a person (they said never mind, or it found another way).
+      case "cancel-help": {
+        const state = await c.call<{ requested?: boolean; holder?: string; request?: { id?: string } }>(b.bot, "GET", "/control");
+        if (state.holder === "human") return bad(409, "A person has the computer already; let them hand it back, or ask them in chat.");
+        if (!state.requested || !state.request?.id) return ok({ cancelled: false, note: "There was no open request." });
+        await act("/control/cancel", { requestId: state.request.id });
+        return ok({ cancelled: true });
+      }
       case "ask-for-help": {
         const reason = str(input.reason);
         if (!reason) return bad(400, "say what you need a person to do (reason)");
@@ -138,6 +148,11 @@ export async function handle(d: ActionDeps, agentId: string, routeKey: string, i
         const end = Date.now() + WAIT_MS;
         let state = await c.call<Control>(b.bot, "GET", "/control");
         while (!settled(state) && Date.now() < end) {
+          // Someone wrote to the agent meanwhile: stop waiting so it reads that first.
+          if (d.steered?.(agentId)) {
+            return ok({ done: false, personWrote: true, holder: state.holder,
+              next: "A person wrote to you in Mattermost while you waited. Read it now: GET <your Paperclip API URL>/api/plugins/mattermost-bridge/api/mm/inbox, and do what it says. If they no longer need you at the computer, POST /pc/cancel-help. Otherwise call /pc/wait again." });
+          }
           await sleep(1000);
           state = await c.call<Control>(b.bot, "GET", "/control");
         }
