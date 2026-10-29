@@ -1,0 +1,141 @@
+diff --git a/agent-computer/src/index.ts b/agent-computer/src/index.ts
+index b6640d1..f056ffe 100644
+--- a/agent-computer/src/index.ts
++++ b/agent-computer/src/index.ts
+@@ -1000,6 +1000,62 @@ serve<StreamData>({
+         return json(session.control.release(body.requestId));
+       }
+ 
++      // The open tabs. A read, like /control: anyone watching may see them.
++      if (url.pathname === "/tabs" && request.method === "GET") {
++        return json({ tabs: await profiles.tabs(botId) });
++      }
++
++      /*
++       * A person driving the browser chrome: the address bar, back, forward, reload and tabs. Only
++       * while they hold the wheel, like their clicks; the Bot has /navigate. The egress proxy applies
++       * to these as to everything else the browser loads.
++       */
++      if (
++        ["/human/navigate", "/human/history", "/human/tabs"].includes(url.pathname) &&
++        request.method === "POST"
++      ) {
++        if (!session.control.humanMayDrive()) {
++          return json({ error: TAKE_CONTROL_FIRST }, 409);
++        }
++        session.humanInputs += 1;
++        const body = (await request.json().catch(() => null)) as {
++          url?: unknown;
++          action?: unknown;
++          index?: unknown;
++        } | null;
++        try {
++          if (url.pathname === "/human/tabs") {
++            const action = body?.action;
++            if (action !== "select" && action !== "new" && action !== "close")
++              return json({ error: "action must be select, new or close." }, 400);
++            const page = await profiles.tab(
++              botId,
++              action,
++              typeof body?.index === "number" ? body.index : undefined,
++            );
++            session.snapshotId += 1;
++            return json({ url: page.url(), tabs: await profiles.tabs(botId) });
++          }
++          const target = await currentPage(botId);
++          if (url.pathname === "/human/navigate") {
++            const parsed = parseNavigateUrl(body?.url);
++            if (!parsed.ok) return json({ error: parsed.error }, 400);
++            await navigateWebPage(target, parsed.url, RUNTIME.backend, NAVIGATION_TIMEOUT_MS);
++          } else {
++            const action = body?.action;
++            const options = { timeout: NAVIGATION_TIMEOUT_MS, waitUntil: "domcontentloaded" as const };
++            if (action === "back") await target.goBack(options);
++            else if (action === "forward") await target.goForward(options);
++            else if (action === "reload") await target.reload(options);
++            else return json({ error: "action must be back, forward or reload." }, 400);
++          }
++          session.snapshotId += 1;
++          return json({ url: target.url(), title: await target.title().catch(() => "") });
++        } catch (error) {
++          return json({ error: describe(error, "That did not work.") }, 502);
++        }
++      }
++
+       // A person's input, by pixel. The Bot addresses elements by reference because it reads a list; a
+       // person addresses them by pointing, because they are looking at a picture. Different problem,
+       // different endpoint, and only usable while they hold the wheel.
+diff --git a/agent-computer/src/profiles.ts b/agent-computer/src/profiles.ts
+index 3aeb838..f8793bc 100644
+--- a/agent-computer/src/profiles.ts
++++ b/agent-computer/src/profiles.ts
+@@ -273,6 +273,8 @@ export type BrowserClosed = (botId: string) => void | Promise<void>;
+ 
+ export function createProfiles(root: string, onClosed: BrowserClosed) {
+   type LiveBrowser = {
++    /** The tab a person switched to, which wins over "newest page". */
++    selected?: Page;
+     context: BrowserContext;
+     page: Page;
+     startedAt: string;
+@@ -536,7 +538,11 @@ export function createProfiles(root: string, onClosed: BrowserClosed) {
+           ...(sessionCookies ? { sessionCookies } : {}),
+         };
+         record.retarget = () => {
+-          const next = chooseLivePage(context.pages());
++          // A tab the person picked stays picked until it closes or the site opens another window.
++          const next =
++            record.selected && !record.selected.isClosed()
++              ? record.selected
++              : chooseLivePage(context.pages());
+           if (!next || next === record.page) return;
+           record.page = next;
+           console.info(
+@@ -551,6 +557,7 @@ export function createProfiles(root: string, onClosed: BrowserClosed) {
+         // in a new window is neither shown to the person taking the wheel nor reachable by input.
+         context.on("page", (opened) => {
+           if (!LOCAL_CHROME) void attachPageNetwork(context, opened, network);
++          record.selected = undefined;
+           record.retarget();
+           // A popup closes itself when it succeeds, and the record must move back to the opener
+           // rather than leave a closed page to be read as a dead browser.
+@@ -582,6 +589,39 @@ export function createProfiles(root: string, onClosed: BrowserClosed) {
+      * repeating it: a request is one more reason a browser closes, not a different kind of closing,
+      * and anything watching has to come down either way.
+      */
++    /** The browser's open tabs, in order; `active` is the one being shown and driven. */
++    async tabs(botId: string): Promise<{ index: number; url: string; title: string; active: boolean }[]> {
++      const current = await this.page(botId);
++      const pages = current.context().pages().filter((p) => !p.isClosed());
++      return Promise.all(pages.map(async (p, index) => ({
++        index, url: p.url(), title: await p.title().catch(() => ""), active: p === current,
++      })));
++    },
++
++    /** Switch to, open or close a tab. Returns the tab now active. */
++    async tab(botId: string, action: "select" | "new" | "close", index?: number): Promise<Page> {
++      const current = await this.page(botId);
++      const record = live.get(botId);
++      const pages = current.context().pages().filter((p) => !p.isClosed());
++      if (!record) return current;
++      if (action === "new") {
++        const opened = await current.context().newPage();
++        record.selected = opened;
++      } else {
++        const target = pages[index ?? -1];
++        if (!target) throw new Error("There is no such tab.");
++        if (action === "select") record.selected = target;
++        else {
++          if (pages.length === 1) throw new Error("The last tab cannot be closed.");
++          if (record.selected === target) record.selected = undefined;
++          await target.close();
++        }
++      }
++      record.retarget();
++      await record.page.bringToFront().catch(() => undefined);
++      return record.page;
++    },
++
+     async stop(botId: string): Promise<boolean> {
+       return closeOnRequest(botId, "it was stopped");
+     },

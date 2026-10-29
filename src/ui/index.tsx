@@ -7,6 +7,7 @@ const PLUGIN = "agent-computer"; // the manifest id
 type Config = Record<string, unknown>;
 interface Secret { id: string; name: string | null; key: string | null; status?: string; deletedAt?: string | null }
 interface AgentRow { id: string; name: string; title: string | null; status: string }
+interface Tab { index: number; url: string; title: string; active: boolean }
 interface Control { holder: "bot" | "human"; requested: boolean; reason?: string; request?: { id: string; reason?: string }; secretWanted?: string; transitioning?: boolean }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -176,8 +177,10 @@ function LiveView({ companyId, agentId }: { companyId: string; agentId: string }
   const control = usePluginAction("control");
   const secret = usePluginAction("secret");
   const goto = usePluginAction("goto");
+  const history = usePluginAction("history");
+  const tab = usePluginAction("tab");
   const streamTicket = usePluginAction("stream-ticket");
-  const [view, setView] = useState<{ control: Control | null; url: string | null; title: string | null } | null>(null);
+  const [view, setView] = useState<{ control: Control | null; tabs: Tab[]; url: string | null; title: string | null } | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
   const [password, setPassword] = useState("");
   const [address, setAddress] = useState<string | null>(null); // null: follow the page
@@ -192,7 +195,7 @@ function LiveView({ companyId, agentId }: { companyId: string; agentId: string }
     const loop = async () => {
       while (live) {
         if (document.visibilityState === "visible") await refresh();
-        await new Promise((r) => setTimeout(r, 1500));
+        await new Promise((r) => setTimeout(r, 1000));
       }
     };
     void loop();
@@ -210,6 +213,7 @@ function LiveView({ companyId, agentId }: { companyId: string; agentId: string }
   const mine = c?.holder === "human";
   const url = view?.url && view.url !== "about:blank" ? view.url : "";
   const frame: CSSProperties = { borderRadius: 10, overflow: "hidden", border: `1px solid ${mine ? "#2f6fed" : "rgba(127,127,127,.3)"}`, boxShadow: mine ? "0 0 0 2px rgba(47,111,237,.35)" : "none" };
+  const chrome: CSSProperties = { border: "none", background: "transparent", color: "inherit", font: "inherit", fontSize: 16, lineHeight: 1, padding: "4px 6px", borderRadius: 6, cursor: "pointer" };
   const bar: CSSProperties = { display: "flex", gap: 8, alignItems: "center", padding: "8px 10px", background: "rgba(127,127,127,.08)" };
 
   return (
@@ -225,12 +229,25 @@ function LiveView({ companyId, agentId }: { companyId: string; agentId: string }
         </div>
       ) : null}
       <div style={frame}>
+        <div style={{ display: "flex", gap: 2, alignItems: "flex-end", padding: "6px 8px 0", background: "rgba(127,127,127,.14)", overflowX: "auto" }}>
+          {(view?.tabs ?? []).map((t) => (
+            <div key={t.index} style={{ display: "flex", alignItems: "center", gap: 6, maxWidth: 220, minWidth: 0, padding: "6px 8px 6px 12px", borderRadius: "8px 8px 0 0", fontSize: 12.5, cursor: "pointer", background: t.active ? "rgba(127,127,127,.08)" : "transparent", opacity: t.active ? 1 : 0.7 }}
+              onClick={() => { if (!t.active) void run(() => tab({ companyId, agentId, action: "select", index: t.index })); }} title={t.url}>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{t.title || (t.url === "about:blank" ? "New tab" : t.url)}</span>
+              {(view?.tabs.length ?? 0) > 1 ? <button aria-label="Close tab" style={chrome} onClick={(e) => { e.stopPropagation(); void run(() => tab({ companyId, agentId, action: "close", index: t.index })); }}>×</button> : null}
+            </div>
+          ))}
+          <button aria-label="New tab" title="New tab" style={{ ...chrome, margin: "0 0 4px 4px" }} disabled={busy} onClick={() => run(() => tab({ companyId, agentId, action: "new" }))}>+</button>
+        </div>
         <div style={bar}>
+          <button aria-label="Back" title="Back" style={chrome} disabled={busy} onClick={() => run(() => history({ companyId, agentId, action: "back" }))}>←</button>
+          <button aria-label="Forward" title="Forward" style={chrome} disabled={busy} onClick={() => run(() => history({ companyId, agentId, action: "forward" }))}>→</button>
+          <button aria-label="Reload" title="Reload" style={chrome} disabled={busy} onClick={() => run(() => history({ companyId, agentId, action: "reload" }))}>↻</button>
           <span title={mine ? "You have the browser" : "The agent has the browser"} style={{ width: 9, height: 9, borderRadius: 9, flex: "none", background: mine ? "#2f6fed" : problem ? "#d24b4e" : "#2e9e6a" }} />
           <form style={{ flex: 1, minWidth: 0, display: "flex" }} onSubmit={(e) => { e.preventDefault(); const u = (address ?? "").trim(); if (u) void run(async () => { await goto({ companyId, agentId, url: u }); setAddress(null); }); }}>
             <input style={{ ...s.input, padding: "6px 12px", borderRadius: 999, background: "rgba(127,127,127,.08)" }} value={address ?? url}
               onFocus={(e) => { setAddress(e.target.value); e.target.select(); }} onBlur={() => setTimeout(() => setAddress(null), 300)}
-              onChange={(e) => setAddress(e.target.value)} placeholder="Search or type a web address" />
+              onChange={(e) => setAddress(e.target.value)} placeholder="Type a web address" />
           </form>
           {mine ? (
             <button style={{ ...s.button, ...s.primary }} disabled={busy} onClick={() => run(() => control({ companyId, agentId, op: "release", requestId: c?.request?.id }))}>Hand back</button>
@@ -245,7 +262,7 @@ function LiveView({ companyId, agentId }: { companyId: string; agentId: string }
         </div>
         <div style={{ position: "relative" }}>
           <LiveScreen ticket={ticket} driving={mine} onProblem={onProblem} />
-          {!url && !problem ? <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", color: "#666", fontSize: 14, pointerEvents: "none" }}>Nothing open yet. Type an address above, or wait for the agent.</div> : null}
+          {!url && !problem ? <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", color: "#666", fontSize: 14, pointerEvents: "none" }}>Nothing open yet. Type an address above (you take over), or wait for the agent.</div> : null}
         </div>
       </div>
       <div style={{ ...s.help, minHeight: 18 }}>

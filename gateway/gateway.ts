@@ -19,7 +19,51 @@ export function validTicket(key: Buffer, agent: string, exp: string, sig: string
   return sig.length === want.length && timingSafeEqual(Buffer.from(sig), Buffer.from(want));
 }
 
-type Data = { agent: string; upstream?: WebSocket; queue: (string | Buffer)[] };
+type Data = { agent: string };
+type Client = Bun.ServerWebSocket<Data>;
+
+/**
+ * One stream per agent, shared. The computer serves one viewer per agent and drops the older one,
+ * so a second tab used to take the screen from the first; here every tab watches the same socket.
+ * A still page sends no frames, so the latest one is replayed to whoever joins.
+ */
+interface Shared { upstream: WebSocket; clients: Set<Client>; last?: string; queue: string[] }
+const streams = new Map<string, Shared>();
+
+function join(ws: Client) {
+  const agent = ws.data.agent;
+  let s = streams.get(agent);
+  if (!s) {
+    const upstream = new WebSocket(`${COMPUTER}/stream?token=${encodeURIComponent(TOKEN)}&bot=${encodeURIComponent(agent)}`);
+    const shared: Shared = { upstream, clients: new Set(), queue: [] };
+    upstream.onopen = () => { for (const m of shared.queue.splice(0)) upstream.send(m); };
+    upstream.onmessage = (m) => {
+      const data = String(m.data);
+      if (data.startsWith('{"type":"frame"')) shared.last = data;
+      for (const c of shared.clients) c.send(data);
+    };
+    const end = () => {
+      if (streams.get(agent) === shared) streams.delete(agent);
+      for (const c of shared.clients) c.close();
+    };
+    upstream.onclose = end;
+    upstream.onerror = end;
+    streams.set(agent, shared);
+    s = shared;
+  }
+  s.clients.add(ws);
+  if (s.last) ws.send(s.last);
+}
+
+function leave(ws: Client) {
+  const s = streams.get(ws.data.agent);
+  if (!s) return;
+  s.clients.delete(ws);
+  if (!s.clients.size) {
+    streams.delete(ws.data.agent);
+    s.upstream.close();
+  }
+}
 
 Bun.serve<Data>({
   port: Number(process.env.PORT ?? 4200),
@@ -31,26 +75,20 @@ Bun.serve<Data>({
     if (!validTicket(KEY, agent, url.searchParams.get("exp") ?? "", url.searchParams.get("sig") ?? "")) {
       return new Response("This link has expired. Reload the page.", { status: 403 });
     }
-    if (server.upgrade(req, { data: { agent, queue: [] } })) return undefined;
+    if (server.upgrade(req, { data: { agent } })) return undefined;
     return new Response("Expected a websocket.", { status: 400 });
   },
   websocket: {
     maxPayloadLength: 4 * 1024 * 1024,
-    open(ws) {
-      const up = new WebSocket(`${COMPUTER}/stream?token=${encodeURIComponent(TOKEN)}&bot=${encodeURIComponent(ws.data.agent)}`);
-      ws.data.upstream = up;
-      up.onopen = () => { for (const m of ws.data.queue.splice(0)) up.send(m); };
-      up.onmessage = (m) => ws.send(m.data as string);
-      up.onclose = () => ws.close();
-      up.onerror = () => ws.close();
-    },
+    open: join,
+    // Input from any tab; the computer accepts it only while a person holds the browser.
     message(ws, m) {
-      const up = ws.data.upstream;
-      if (up?.readyState === WebSocket.OPEN) up.send(m);
-      else if (ws.data.queue.length < 50) ws.data.queue.push(m);
+      const s = streams.get(ws.data.agent);
+      if (!s) return;
+      const text = typeof m === "string" ? m : m.toString();
+      if (s.upstream.readyState === WebSocket.OPEN) s.upstream.send(text);
+      else if (s.queue.length < 50) s.queue.push(text);
     },
-    close(ws) {
-      ws.data.upstream?.close();
-    },
+    close: leave,
   },
 });

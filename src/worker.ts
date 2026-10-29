@@ -74,11 +74,12 @@ const plugin = definePlugin({
     ctx.actions.register("state", async (params, context) => {
       person(context);
       const { t, agent } = await forTab(params);
-      const [control, page] = await Promise.all([
+      const [control, tabs] = await Promise.all([
         t.computer.call(agent.id, "GET", "/control", undefined, 10_000).catch(() => null),
-        t.computer.call<{ url?: string; title?: string }>(agent.id, "GET", "/read", undefined, 15_000).catch(() => null),
+        t.computer.call<{ tabs?: { index: number; url: string; title: string; active: boolean }[] }>(agent.id, "GET", "/tabs", undefined, 15_000).then((r) => r.tabs ?? []).catch(() => []),
       ]);
-      return { control, url: page?.url ?? null, title: page?.title ?? null };
+      const active = tabs.find((x) => x.active);
+      return { control, tabs, url: active?.url ?? null, title: active?.title ?? null };
     });
     ctx.actions.register("control", async (params, context) => {
       person(context);
@@ -100,29 +101,36 @@ const plugin = definePlugin({
       const sig = createHmac("sha256", t.ticketKey).update(`${agent.id}.${exp}`).digest("hex");
       return { path: `/_computer/stream?agent=${agent.id}&exp=${exp}&sig=${sig}` };
     });
-    // The address bar. The computer only lets the agent navigate, so while a person holds the browser
-    // it is handed back for the one navigation and taken again.
+    // The browser chrome: address bar, back, forward, reload and tabs. They act as the person, so a
+    // person who does not hold the browser yet takes it first, as they would to click on the page.
+    const hold = async (t: Tenant, agentId: string) => {
+      // The computer blocks every site until it has this agent's policy, and a person may be first.
+      await t.computer.egress(agentId, egressFor(t.sites.get(agentId)));
+      const c = await t.computer.call<{ holder?: string; requested?: boolean; request?: { id?: string } }>(agentId, "GET", "/control");
+      if (c.holder === "human") return;
+      const id = c.requested && c.request?.id ? c.request.id
+        : (await t.computer.call<{ request?: { id?: string } }>(agentId, "POST", "/control/request", { reason: "A person stepped in from Paperclip." })).request?.id;
+      await t.computer.call(agentId, "POST", "/control/take", { requestId: id ?? "" });
+    };
     ctx.actions.register("goto", async (params, context) => {
       person(context);
       const { t, agent } = await forTab(params);
       const url = typeof params.url === "string" ? params.url.trim() : "";
       if (!url) throw new Error("Type an address.");
-      const full = /^[a-z]+:\/\//i.test(url) ? url : `https://${url}`;
-      const c = t.computer;
-      const state = await c.call<{ holder?: string; request?: { id?: string }; resumeSnapshotRequired?: boolean }>(agent.id, "GET", "/control");
-      const held = state.holder === "human";
-      if (held) await c.call(agent.id, "POST", "/control/release", { requestId: state.request?.id ?? "" });
-      // After a handback the computer wants a fresh look before any action.
-      if (held || state.resumeSnapshotRequired) await c.call(agent.id, "POST", "/snapshot", {});
-      await c.egress(agent.id, egressFor(t.sites.get(agent.id)));
-      try {
-        return await c.call(agent.id, "POST", "/navigate", { url: full });
-      } finally {
-        if (held) {
-          const req = await c.call<{ request?: { id?: string } }>(agent.id, "POST", "/control/request", { reason: "A person stepped in from Paperclip." });
-          await c.call(agent.id, "POST", "/control/take", { requestId: req.request?.id });
-        }
-      }
+      await hold(t, agent.id);
+      return t.computer.call(agent.id, "POST", "/human/navigate", { url: /^[a-z]+:\/\//i.test(url) ? url : `https://${url}` });
+    });
+    ctx.actions.register("history", async (params, context) => {
+      person(context);
+      const { t, agent } = await forTab(params);
+      await hold(t, agent.id);
+      return t.computer.call(agent.id, "POST", "/human/history", { action: String(params.action) });
+    });
+    ctx.actions.register("tab", async (params, context) => {
+      person(context);
+      const { t, agent } = await forTab(params);
+      await hold(t, agent.id);
+      return t.computer.call(agent.id, "POST", "/human/tabs", { action: String(params.action), index: typeof params.index === "number" ? params.index : undefined });
     });
     // A password for the field the agent pointed at. Typed into the page and dropped: never logged, stored or returned.
     ctx.actions.register("secret", async (params, context) => {
