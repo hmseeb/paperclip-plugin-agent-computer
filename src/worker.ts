@@ -1,6 +1,6 @@
 import { definePlugin, runWorker, type PluginContext } from "@paperclipai/plugin-sdk";
 import { handle } from "./actions.ts";
-import { Computer } from "./computer.ts";
+import { Computer, egressFor } from "./computer.ts";
 import { HELP } from "./help.ts";
 
 let ctx: PluginContext;
@@ -97,6 +97,30 @@ const plugin = definePlugin({
       if (!path) throw new Error("Unknown input.");
       const { x, y, text, key, deltaY } = params;
       return t.computer.call(agent.id, "POST", path, { x, y, text, key, deltaY }, 20_000);
+    });
+    // The address bar. The computer only lets the agent navigate, so while a person holds the browser
+    // it is handed back for the one navigation and taken again.
+    ctx.actions.register("goto", async (params, context) => {
+      person(context);
+      const { t, agent } = await forTab(params);
+      const url = typeof params.url === "string" ? params.url.trim() : "";
+      if (!url) throw new Error("Type an address.");
+      const full = /^[a-z]+:\/\//i.test(url) ? url : `https://${url}`;
+      const c = t.computer;
+      const state = await c.call<{ holder?: string; request?: { id?: string }; resumeSnapshotRequired?: boolean }>(agent.id, "GET", "/control");
+      const held = state.holder === "human";
+      if (held) await c.call(agent.id, "POST", "/control/release", { requestId: state.request?.id ?? "" });
+      // After a handback the computer wants a fresh look before any action.
+      if (held || state.resumeSnapshotRequired) await c.call(agent.id, "POST", "/snapshot", {});
+      await c.egress(agent.id, egressFor(t.sites.get(agent.id)));
+      try {
+        return await c.call(agent.id, "POST", "/navigate", { url: full });
+      } finally {
+        if (held) {
+          const req = await c.call<{ request?: { id?: string } }>(agent.id, "POST", "/control/request", { reason: "A person stepped in from Paperclip." });
+          await c.call(agent.id, "POST", "/control/take", { requestId: req.request?.id });
+        }
+      }
     });
     // A password for the field the agent pointed at. Typed into the page and dropped: never logged, stored or returned.
     ctx.actions.register("secret", async (params, context) => {

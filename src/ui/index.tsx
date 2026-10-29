@@ -177,6 +177,8 @@ function LiveView({ companyId, agentId }: { companyId: string; agentId: string }
   const control = usePluginAction("control");
   const input = usePluginAction("input");
   const secret = usePluginAction("secret");
+  const goto = usePluginAction("goto");
+  const [address, setAddress] = useState<string | null>(null); // null: follow the page
   const [view, setView] = useState<Screen | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [password, setPassword] = useState("");
@@ -213,8 +215,12 @@ function LiveView({ companyId, agentId }: { companyId: string; agentId: string }
   return (
     <div style={{ display: "grid", gap: 12, maxWidth: 1100, minWidth: 0 }}>
       <div style={s.row}>
-        <span style={{ ...s.help, opacity: 0.85 }}>{view?.shot.url ? view.shot.url : "No page open yet"}</span>
-        <span style={{ flex: 1 }} />
+        <form style={{ flex: 1, minWidth: 0, display: "flex", gap: 8 }} onSubmit={(e) => { e.preventDefault(); const url = address ?? ""; if (url.trim()) void run(async () => { await goto({ companyId, agentId, url }); setAddress(null); }); }}>
+          <input style={{ ...s.input, flex: 1, minWidth: 0 }} value={address ?? (view?.shot.url && view.shot.url !== "about:blank" ? view.shot.url : "")}
+            onFocus={(e) => { setAddress(e.target.value); e.target.select(); }} onBlur={() => setTimeout(() => setAddress(null), 300)} // after Go's click has read it
+            onChange={(e) => setAddress(e.target.value)} placeholder="Type an address to open it in this browser" />
+          <button style={s.button} type="submit" disabled={busy || !address?.trim()}>Go</button>
+        </form>
         {mine ? (
           <button style={{ ...s.button, ...s.primary }} disabled={busy} onClick={() => run(() => control({ companyId, agentId, op: "release", requestId: c?.request?.id }))}>Hand back to the agent</button>
         ) : c?.requested && c.request ? (
@@ -255,7 +261,7 @@ function LiveView({ companyId, agentId }: { companyId: string; agentId: string }
             else if (KEYS.has(e.key)) { e.preventDefault(); void send({ kind: "key", key: e.key }); }
           }}
         />
-      ) : view?.shot.error ? <div style={s.help}>The browser is not running yet ({view.shot.error}). It starts when the agent first opens a page, or when you take over.</div> : <div style={s.help}>Loading the screen…</div>}
+      ) : view?.shot.error ? <div style={s.help}>The browser is not running yet ({view.shot.error}). Type an address above to start it.</div> : <div style={s.help}>Loading the screen…</div>}
     </div>
   );
 }
