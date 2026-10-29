@@ -1,4 +1,5 @@
 import { definePlugin, runWorker, type PluginContext } from "@paperclipai/plugin-sdk";
+import { createHmac } from "node:crypto";
 import { handle } from "./actions.ts";
 import { Computer, egressFor } from "./computer.ts";
 import { HELP } from "./help.ts";
@@ -7,9 +8,8 @@ let ctx: PluginContext;
 const errText = (err: unknown) => String((err as Error)?.message ?? err);
 // Every company's settings, kept so a worker restarted without a config replay still serves them.
 const BOOT = { scopeKind: "instance" as const, namespace: "computer", stateKey: "boot" };
-const HUMAN = { click: "/human/click", type: "/human/type", key: "/human/key", scroll: "/human/scroll" } as const;
 
-interface Tenant { computer: Computer; sites: Map<string, string[]> }
+interface Tenant { computer: Computer; sites: Map<string, string[]>; ticketKey: Buffer }
 const tenants = new Map<string, Tenant>();
 
 async function start(companyId: string, config: Record<string, unknown>): Promise<Tenant | null> {
@@ -20,7 +20,8 @@ async function start(companyId: string, config: Record<string, unknown>): Promis
   for (const s of Array.isArray(config.sites) ? (config.sites as { agentId?: string; sites?: string[] }[]) : []) {
     if (s?.agentId && Array.isArray(s.sites)) sites.set(s.agentId, s.sites);
   }
-  const t = { computer: new Computer(url, token), sites };
+  // Signs live-screen tickets; gateway/gateway.ts derives the same key from the same token.
+  const t = { computer: new Computer(url, token), sites, ticketKey: createHmac("sha256", token).update("agent-computer stream tickets").digest() };
   tenants.set(companyId, t);
   return t;
 }
@@ -69,14 +70,15 @@ const plugin = definePlugin({
       const agent = await agentOf(companyId, params.agentId);
       return { t, agent, companyId };
     };
-    ctx.actions.register("screen", async (params, context) => {
+    // What the page polls: who has the browser and which page it is on. The picture comes from the stream.
+    ctx.actions.register("state", async (params, context) => {
       person(context);
       const { t, agent } = await forTab(params);
-      const [shot, control] = await Promise.all([
-        t.computer.call<{ base64?: string; width?: number; height?: number; url?: string }>(agent.id, "GET", "/screenshot", undefined, 20_000).catch((err) => ({ error: errText(err) })),
+      const [control, page] = await Promise.all([
         t.computer.call(agent.id, "GET", "/control", undefined, 10_000).catch(() => null),
+        t.computer.call<{ url?: string; title?: string }>(agent.id, "GET", "/read", undefined, 15_000).catch(() => null),
       ]);
-      return { shot, control };
+      return { control, url: page?.url ?? null, title: page?.title ?? null };
     });
     ctx.actions.register("control", async (params, context) => {
       person(context);
@@ -90,13 +92,13 @@ const plugin = definePlugin({
       if (!["take", "release", "cancel"].includes(op)) throw new Error("Unknown control action.");
       return t.computer.call(agent.id, "POST", `/control/${op}`, { requestId: String(params.requestId ?? "") });
     });
-    ctx.actions.register("input", async (params, context) => {
+    // A ticket for the live screen: the gateway at /_computer/stream checks it and adds the token.
+    ctx.actions.register("stream-ticket", async (params, context) => {
       person(context);
       const { t, agent } = await forTab(params);
-      const path = HUMAN[String(params.kind) as keyof typeof HUMAN];
-      if (!path) throw new Error("Unknown input.");
-      const { x, y, text, key, deltaY } = params;
-      return t.computer.call(agent.id, "POST", path, { x, y, text, key, deltaY }, 20_000);
+      const exp = String(Math.floor(Date.now() / 1000) + 60);
+      const sig = createHmac("sha256", t.ticketKey).update(`${agent.id}.${exp}`).digest("hex");
+      return { path: `/_computer/stream?agent=${agent.id}&exp=${exp}&sig=${sig}` };
     });
     // The address bar. The computer only lets the agent navigate, so while a person holds the browser
     // it is handed back for the one navigation and taken again.

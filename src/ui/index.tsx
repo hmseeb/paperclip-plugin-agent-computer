@@ -1,5 +1,6 @@
 // The settings page and the agent's Computer tab.
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { LiveScreen } from "./live-screen.tsx";
 import { usePluginAction, usePluginData, type PluginPageProps, type PluginSettingsPageProps, type PluginSidebarProps } from "@paperclipai/plugin-sdk/ui";
 
 const PLUGIN = "agent-computer"; // the manifest id
@@ -7,7 +8,6 @@ type Config = Record<string, unknown>;
 interface Secret { id: string; name: string | null; key: string | null; status?: string; deletedAt?: string | null }
 interface AgentRow { id: string; name: string; title: string | null; status: string }
 interface Control { holder: "bot" | "human"; requested: boolean; reason?: string; request?: { id: string; reason?: string }; secretWanted?: string; transitioning?: boolean }
-interface Screen { shot: { base64?: string; width?: number; height?: number; url?: string; error?: string }; control: Control | null }
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(path, { credentials: "include", ...init, headers: { "content-type": "application/json", ...(init?.headers ?? {}) } });
@@ -121,7 +121,6 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
   );
 }
 
-const KEYS = new Set(["Enter", "Backspace", "Tab", "Escape", "Delete", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"]);
 
 export function ComputersLink({ context }: PluginSidebarProps) {
   if (!context.companyPrefix) return null;
@@ -171,97 +170,90 @@ export function ComputersPage({ context }: PluginPageProps) {
   );
 }
 
-/** One agent's browser, live: refreshed a few times a second, with take over, hand back and passwords. */
+/** One agent's browser, live, with take over, hand back, an address bar and passwords. */
 function LiveView({ companyId, agentId }: { companyId: string; agentId: string }) {
-  const screen = usePluginAction("screen");
+  const state = usePluginAction("state");
   const control = usePluginAction("control");
-  const input = usePluginAction("input");
   const secret = usePluginAction("secret");
   const goto = usePluginAction("goto");
-  const [address, setAddress] = useState<string | null>(null); // null: follow the page
-  const [view, setView] = useState<Screen | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const streamTicket = usePluginAction("stream-ticket");
+  const [view, setView] = useState<{ control: Control | null; url: string | null; title: string | null } | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
   const [password, setPassword] = useState("");
+  const [address, setAddress] = useState<string | null>(null); // null: follow the page
   const [busy, setBusy] = useState(false);
   const [flash, setFlash] = useState<string | null>(null);
-  const img = useRef<HTMLImageElement>(null);
 
+  const refresh = useCallback(async () => {
+    try { setView((await state({ companyId, agentId })) as never); } catch (e) { setProblem(errText(e)); }
+  }, [companyId, agentId]);
   useEffect(() => {
     let live = true;
-    const tick = async () => {
+    const loop = async () => {
       while (live) {
-        if (document.visibilityState === "visible") {
-          try { setView((await screen({ companyId, agentId })) as Screen); setError(null); } catch (e) { setError(errText(e)); }
-        }
-        await new Promise((r) => setTimeout(r, document.visibilityState === "visible" ? 300 : 2000));
+        if (document.visibilityState === "visible") await refresh();
+        await new Promise((r) => setTimeout(r, 1500));
       }
     };
-    void tick();
+    void loop();
     return () => { live = false; };
-  }, [companyId, agentId]);
+  }, [refresh]);
+
+  const ticket = useCallback(async () => ((await streamTicket({ companyId, agentId })) as { path: string }).path, [companyId, agentId]);
+  const onProblem = useCallback((p: string | null) => setProblem(p), []);
+  const run = async (fn: () => Promise<unknown>, done?: string) => {
+    setBusy(true); setFlash(null);
+    try { await fn(); if (done) setFlash(done); await refresh(); } catch (e) { setFlash(errText(e)); } finally { setBusy(false); }
+  };
 
   const c = view?.control;
   const mine = c?.holder === "human";
-  const send = (params: Record<string, unknown>) => input({ companyId, agentId, ...params }).catch((e) => setFlash(errText(e)));
-  const run = async (fn: () => Promise<unknown>) => { setBusy(true); setFlash(null); try { await fn(); } catch (e) { setFlash(errText(e)); } finally { setBusy(false); } };
-
-  const at = (e: { clientX: number; clientY: number }) => {
-    const el = img.current;
-    if (!el || !view?.shot.width) return null;
-    const r = el.getBoundingClientRect();
-    return { x: Math.round(((e.clientX - r.left) / r.width) * view.shot.width), y: Math.round(((e.clientY - r.top) / r.height) * (view.shot.height ?? 800)) };
-  };
+  const url = view?.url && view.url !== "about:blank" ? view.url : "";
+  const frame: CSSProperties = { borderRadius: 10, overflow: "hidden", border: `1px solid ${mine ? "#2f6fed" : "rgba(127,127,127,.3)"}`, boxShadow: mine ? "0 0 0 2px rgba(47,111,237,.35)" : "none" };
+  const bar: CSSProperties = { display: "flex", gap: 8, alignItems: "center", padding: "8px 10px", background: "rgba(127,127,127,.08)" };
 
   return (
-    <div style={{ display: "grid", gap: 12, maxWidth: 1100, minWidth: 0 }}>
-      <div style={s.row}>
-        <form style={{ flex: 1, minWidth: 0, display: "flex", gap: 8 }} onSubmit={(e) => { e.preventDefault(); const url = address ?? ""; if (url.trim()) void run(async () => { await goto({ companyId, agentId, url }); setAddress(null); }); }}>
-          <input style={{ ...s.input, flex: 1, minWidth: 0 }} value={address ?? (view?.shot.url && view.shot.url !== "about:blank" ? view.shot.url : "")}
-            onFocus={(e) => { setAddress(e.target.value); e.target.select(); }} onBlur={() => setTimeout(() => setAddress(null), 300)} // after Go's click has read it
-            onChange={(e) => setAddress(e.target.value)} placeholder="Type an address to open it in this browser" />
-          <button style={s.button} type="submit" disabled={busy || !address?.trim()}>Go</button>
-        </form>
-        {mine ? (
-          <button style={{ ...s.button, ...s.primary }} disabled={busy} onClick={() => run(() => control({ companyId, agentId, op: "release", requestId: c?.request?.id }))}>Hand back to the agent</button>
-        ) : c?.requested && c.request ? (
-          <>
-            <button style={{ ...s.button, ...s.primary }} disabled={busy} onClick={() => run(() => control({ companyId, agentId, op: "take", requestId: c.request!.id }))}>Take over</button>
-            <button style={s.button} disabled={busy} onClick={() => run(() => control({ companyId, agentId, op: "cancel", requestId: c.request!.id }))}>Decline</button>
-          </>
-        ) : (
-          <button style={s.button} disabled={busy || !view} onClick={() => run(() => control({ companyId, agentId, op: "take" }))}>Take over</button>
-        )}
-      </div>
+    <div style={{ display: "grid", gap: 10, minWidth: 0, maxWidth: 1280 }}>
       {c?.requested && !mine ? <div style={s.warn}><b>The agent is asking for help:</b> {c.request?.reason ?? c.reason ?? "it is stuck"}. Take over, do what it needs, then hand back.</div> : null}
       {c?.secretWanted ? (
         <div style={s.warn}>
           <div style={{ marginBottom: 8 }}><b>The agent needs your {c.secretWanted}.</b> It goes straight into the field on the page; the agent never sees it.</div>
           <div style={s.row}>
             <input style={{ ...s.input, maxWidth: 320 }} type="password" autoComplete="off" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={c.secretWanted} />
-            <button style={{ ...s.button, ...s.primary }} disabled={busy || !password} onClick={() => run(async () => { await secret({ companyId, agentId, text: password }); setPassword(""); setFlash("Entered."); })}>Enter it</button>
+            <button style={{ ...s.button, ...s.primary }} disabled={busy || !password} onClick={() => run(async () => { await secret({ companyId, agentId, text: password }); setPassword(""); }, "Entered.")}>Enter it</button>
           </div>
         </div>
       ) : null}
-      {mine ? <div style={s.help}>You have the browser. Click on the page and type; the agent waits until you hand it back.</div> : null}
-      {flash ? <div style={flash === "Entered." ? s.ok : s.bad}>{flash}</div> : null}
-      {error ? <div style={s.bad}>{error}</div> : null}
-      {view?.shot.base64 ? (
-        <img
-          ref={img}
-          src={`data:image/png;base64,${view.shot.base64}`}
-          alt="The agent's browser"
-          tabIndex={mine ? 0 : -1}
-          draggable={false}
-          style={{ width: "100%", borderRadius: 8, border: `2px solid ${mine ? "#2f6fed" : "rgba(127,127,127,.3)"}`, cursor: mine ? "pointer" : "default", outline: "none" }}
-          onClick={(e) => { if (!mine) return; e.currentTarget.focus(); const p = at(e); if (p) void send({ kind: "click", ...p }); }}
-          onWheel={(e) => { if (mine) void send({ kind: "scroll", deltaY: Math.round(e.deltaY) }); }}
-          onKeyDown={(e) => {
-            if (!mine || e.metaKey || e.ctrlKey) return;
-            if (e.key.length === 1) { e.preventDefault(); void send({ kind: "type", text: e.key }); }
-            else if (KEYS.has(e.key)) { e.preventDefault(); void send({ kind: "key", key: e.key }); }
-          }}
-        />
-      ) : view?.shot.error ? <div style={s.help}>The browser is not running yet ({view.shot.error}). Type an address above to start it.</div> : <div style={s.help}>Loading the screen…</div>}
+      <div style={frame}>
+        <div style={bar}>
+          <span title={mine ? "You have the browser" : "The agent has the browser"} style={{ width: 9, height: 9, borderRadius: 9, flex: "none", background: mine ? "#2f6fed" : problem ? "#d24b4e" : "#2e9e6a" }} />
+          <form style={{ flex: 1, minWidth: 0, display: "flex" }} onSubmit={(e) => { e.preventDefault(); const u = (address ?? "").trim(); if (u) void run(async () => { await goto({ companyId, agentId, url: u }); setAddress(null); }); }}>
+            <input style={{ ...s.input, padding: "6px 12px", borderRadius: 999, background: "rgba(127,127,127,.08)" }} value={address ?? url}
+              onFocus={(e) => { setAddress(e.target.value); e.target.select(); }} onBlur={() => setTimeout(() => setAddress(null), 300)}
+              onChange={(e) => setAddress(e.target.value)} placeholder="Search or type a web address" />
+          </form>
+          {mine ? (
+            <button style={{ ...s.button, ...s.primary }} disabled={busy} onClick={() => run(() => control({ companyId, agentId, op: "release", requestId: c?.request?.id }))}>Hand back</button>
+          ) : c?.requested && c.request ? (
+            <>
+              <button style={{ ...s.button, ...s.primary }} disabled={busy} onClick={() => run(() => control({ companyId, agentId, op: "take", requestId: c.request!.id }))}>Take over</button>
+              <button style={s.button} disabled={busy} onClick={() => run(() => control({ companyId, agentId, op: "cancel", requestId: c.request!.id }))}>Decline</button>
+            </>
+          ) : (
+            <button style={s.button} disabled={busy || !view} onClick={() => run(() => control({ companyId, agentId, op: "take" }))}>Take over</button>
+          )}
+        </div>
+        <div style={{ position: "relative" }}>
+          <LiveScreen ticket={ticket} driving={mine} onProblem={onProblem} />
+          {!url && !problem ? <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", color: "#666", fontSize: 14, pointerEvents: "none" }}>Nothing open yet. Type an address above, or wait for the agent.</div> : null}
+        </div>
+      </div>
+      <div style={{ ...s.help, minHeight: 18 }}>
+        {problem ? <span style={s.bad}>{problem}</span>
+          : flash ? <span style={flash === "Entered." ? s.ok : s.bad}>{flash}</span>
+          : mine ? "You have the browser: click, type, scroll, drag, use shortcuts and paste. The agent waits until you hand it back."
+          : view?.title ? `${view.title} · the agent has the browser. Take over to use it yourself.` : "The agent has the browser. Take over to use it yourself."}
+      </div>
     </div>
   );
 }
