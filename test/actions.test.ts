@@ -134,3 +134,19 @@ test("after a hand-back, opening a page takes the fresh look itself", async () =
   assert.equal(r.status, 200);
   assert.deepEqual(f.calls.map((c) => c.path), ["/egress-policy", "/navigate", "/snapshot", "/navigate"]);
 });
+
+test("a page that fails through a dead proxy is opened again over the computer's own connection", async () => {
+  let proxyDown = false, navigations = 0;
+  const f = fake((p) => {
+    if (p !== "/navigate") return [200, {}];
+    navigations++;
+    return proxyDown ? [200, { title: "Example" }] : [502, { error: "goto: net::ERR_TUNNEL_CONNECTION_FAILED at https://example.com/" }];
+  });
+  const d = { ...deps(f.computer), proxyFailed: async () => { proxyDown = true; return true; } };
+  const r = await handle(d, "a", "open", { url: "https://example.com" });
+  assert.equal(r.status, 200);
+  assert.equal(navigations, 2);
+  assert.match((r.body as { note: string }).note, /proxy is not working/);
+  const plain = await handle({ ...deps(fake(() => [502, { error: "goto: net::ERR_NAME_NOT_RESOLVED" }]).computer), proxyFailed: async () => false }, "a", "open", { url: "https://nope.test" });
+  assert.equal(plain.status, 502, "with the proxy fine (or none), a failed page is just reported");
+});

@@ -27,6 +27,8 @@ export interface ActionDeps {
     teach(agentId: string, name: string, to: string): Promise<string | null>;
   };
   sleep?: (ms: number) => Promise<void>;
+  /** A page failed on a computer with a proxy: true when the proxy is down (calls now go direct), so retry. */
+  proxyFailed?(bot: string): Promise<boolean>;
 }
 
 type Result = { status: number; body: unknown };
@@ -86,7 +88,22 @@ export async function handle(d: ActionDeps, agentId: string, routeKey: string, i
         const url = str(input.url);
         if (!url) return bad(400, "url is required");
         await c.egress(b.bot, egressFor(b.sites)); // pushed each time: the computer forgets it on restart
-        res = ok(await freshly("/navigate", { url }));
+        try {
+          res = ok(await freshly("/navigate", { url }));
+        } catch (err) {
+          // A dead proxy: switch this computer to its own connection and try once more.
+          // Chrome words a dead proxy several ways, so any failed load is a reason to check it (cheap, and only with a proxy).
+          if (!(err instanceof ComputerError && err.status === 502 && await d.proxyFailed?.(b.bot))) throw err;
+          await c.egress(b.bot, egressFor(b.sites));
+          // Chrome takes a moment to drop the dead route, so twice, a little apart.
+          const sleep = d.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
+          let page: Record<string, unknown> | undefined;
+          for (let attempt = 0; !page; attempt++) {
+            await sleep(1500);
+            try { page = await freshly("/navigate", { url }); } catch (again) { if (attempt >= 1) throw again; }
+          }
+          res = ok({ ...page, note: "Your proxy is not working, so this page was opened over the computer's own connection. People see this in the plugin settings." });
+        }
         break;
       }
       case "read": res = ok(await c.call(b.bot, "GET", "/read")); break;

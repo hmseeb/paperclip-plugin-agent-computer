@@ -33,6 +33,7 @@ function Field({ label, help, children }: { label: string; help?: ReactNode; chi
   return <div style={s.field}><div style={s.label}>{label}</div>{children}{help ? <div style={s.help}>{help}</div> : null}</div>;
 }
 
+type ProxyResult = { ok: true; ip: string; ms: number } | { ok: false; error: string; ms: number };
 const errText = (e: unknown) => String((e as Error)?.message ?? e).slice(0, 300);
 
 /** A proxy choice: the default, the host's own connection, or one of the named proxies. */
@@ -52,13 +53,16 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
   const [secrets, setSecrets] = useState<Secret[]>([]);
   const [agents, setAgents] = useState<AgentRow[]>([]);
   const [sites, setSites] = useState<Record<string, string>>({});
-  const [proxies, setProxies] = useState<{ id: string; name: string; secretId: string }[]>([]);
+  /** `url`: a pasted address not saved yet; `check`: its last test (for a saved one the plugin's own checks show). */
+  type ProxyRow = { id: string; name: string; secretId: string; url: string; check?: ProxyResult | null; testing?: boolean };
+  const [proxies, setProxies] = useState<ProxyRow[]>([]);
+  const testProxy = usePluginAction("test-proxy");
   const [defaultProxy, setDefaultProxy] = useState("none");
   const [agentProxies, setAgentProxies] = useState<Record<string, string>>({});
   const [shared, setShared] = useState<{ id: string; name: string; allAgents: boolean; agents: string[]; sites: string; proxy?: string }[]>([]);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [saving, setSaving] = useState(false);
-  const setup = usePluginData<{ connected: boolean; status: string }>("setup", { companyId });
+  const setup = usePluginData<{ connected: boolean; status: string; proxies?: Record<string, (ProxyResult & { at: number }) | null> }>("setup", { companyId });
   const skill = usePluginAction("skill");
 
   useEffect(() => {
@@ -74,7 +78,7 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
       setAgents(ags.filter((a) => a.status !== "terminated"));
       setShared((Array.isArray(c.sharedComputers ?? c.sharedBrowsers) ? ((c.sharedComputers ?? c.sharedBrowsers) as { id: string; name: string; allAgents?: boolean; agents?: string[]; sites?: string[] }[]) : [])
         .map((b) => ({ id: b.id, name: b.name, allAgents: b.allAgents !== false, agents: b.agents ?? [], sites: (b.sites ?? []).join(", "), proxy: (b as { proxy?: string }).proxy })));
-      setProxies((Array.isArray(c.proxies) ? (c.proxies as { id: string; name?: string; url?: { secretId?: string } }[]) : []).map((x) => ({ id: x.id, name: x.name ?? "", secretId: x.url?.secretId ?? "" })));
+      setProxies((Array.isArray(c.proxies) ? (c.proxies as { id: string; name?: string; url?: { secretId?: string } }[]) : []).map((x) => ({ id: x.id, name: x.name ?? "", secretId: x.url?.secretId ?? "", url: "" })));
       setDefaultProxy(typeof c.defaultProxy === "string" ? c.defaultProxy : "none");
       setAgentProxies((c.agentProxies && typeof c.agentProxies === "object" ? c.agentProxies : {}) as Record<string, string>);
       setSites(Object.fromEntries((Array.isArray(c.sites) ? (c.sites as { agentId: string; sites?: string[] }[]) : []).map((x) => [x.agentId, (x.sites ?? []).join(", ")])));
@@ -97,8 +101,26 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
       const dup = named.find((b, i) => named.findIndex((x) => x.name.trim().toLowerCase() === b.name.trim().toLowerCase()) !== i);
       if (dup) { setNote({ ok: false, text: `Two shared computers are called "${dup.name.trim()}"; give each its own name.` }); setSaving(false); return; }
       const sharedComputers = named.map((b) => ({ id: b.id, name: b.name.trim(), allAgents: b.allAgents, agents: b.allAgents ? [] : b.agents, sites: split(b.sites), ...(b.proxy && b.proxy !== "default" ? { proxy: b.proxy } : {}) }));
-      const usable = proxies.filter((p) => p.name.trim() && p.secretId);
-      if (usable.length < proxies.length) { setNote({ ok: false, text: "Give every proxy a name and a secret, or remove it." }); setSaving(false); return; }
+      // Proxies: a pasted URL is tested first, and saved only if it works, as a Paperclip secret.
+      const bad = proxies.find((p) => !p.name.trim() || (!p.secretId && !p.url.trim()));
+      if (bad) { setNote({ ok: false, text: "Give every proxy a name and paste its URL, or remove it." }); setSaving(false); return; }
+      const rows = [...proxies];
+      for (const [i, p] of rows.entries()) {
+        if (!p.url.trim()) continue;
+        const check = (await testProxy({ companyId, url: p.url })) as ProxyResult;
+        rows[i] = { ...p, check };
+        if (!check.ok) { setProxies(rows); setNote({ ok: false, text: `Not saved: the proxy "${p.name.trim()}" does not work (${check.error}). Fix its URL or remove it.` }); setSaving(false); return; }
+        if (p.secretId) await api(`/api/secrets/${p.secretId}/rotate`, { method: "POST", body: JSON.stringify({ value: p.url.trim() }) });
+        else {
+          const made = await api<{ id: string }>(`/api/companies/${companyId}/secrets`, { method: "POST", body: JSON.stringify({
+            name: `Agent computer proxy: ${p.name.trim()}`, key: `AGENT_COMPUTER_PROXY_${p.id.replace(/[^a-zA-Z0-9]/g, "_").toUpperCase()}`,
+            value: p.url.trim(), description: "Proxy URL for the Agent computer plugin; edit it from the plugin's settings." }) });
+          rows[i] = { ...rows[i], secretId: made.id };
+        }
+        rows[i] = { ...rows[i], url: "" };
+      }
+      setProxies(rows);
+      const usable = rows;
       const proxyCfg = { proxies: usable.map((p) => ({ id: p.id, name: p.name.trim(), url: { type: "secret_ref", version: "latest", secretId: p.secretId } })),
         defaultProxy, agentProxies: Object.fromEntries(Object.entries(agentProxies).filter(([, v]) => v && v !== "default")) };
       const { sharedBrowsers: _old, ...rest } = config!;
@@ -134,20 +156,32 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
           {secrets.map((x) => <option key={x.id} value={x.id}>{x.name || x.key || x.id}</option>)}
         </select>
       </Field>
-      <Field label="Proxies" help={<>Where the computers' web traffic goes out. With none, it goes out from wherever the computer runs, which for a server in a datacentre is a datacentre address that many sites block or challenge. Add a proxy (a residential one, for example) as a Paperclip secret holding its URL, <code>http://user:password@host:port</code>. Many residential providers rotate the address on every connection; choose a "sticky session" from them so a computer keeps one address and its logins.</>}>
+      <Field label="Proxies" help={<>Where the computers' web traffic goes out. With none, it goes out from wherever the computer runs, which for a server in a datacentre is a datacentre address that many sites block or challenge. Add a proxy (a residential one, for example): paste its URL, <code>http://user:password@host:port</code>, and test it; it is kept as a Paperclip secret. A proxy that stops working is skipped (computers use their own connection) until it works again. Many residential providers rotate the address on every connection; choose a "sticky session" from them so a computer keeps one address and its logins.</>}>
         <div style={{ display: "grid", gap: 8 }}>
           {proxies.map((p, i) => (
             <div key={p.id} style={s.row}>
               <input style={{ ...s.input, flex: 1 }} value={p.name} placeholder="Name, e.g. US residential" onChange={(e) => { setNote(null); setProxies(proxies.map((x, j) => (j === i ? { ...x, name: e.target.value } : x))); }} />
-              <select style={{ ...s.input, flex: 1 }} value={p.secretId} onChange={(e) => { setNote(null); setProxies(proxies.map((x, j) => (j === i ? { ...x, secretId: e.target.value } : x))); }}>
-                <option value="">Secret with the proxy URL…</option>
-                {secrets.map((x) => <option key={x.id} value={x.id}>{x.name || x.key || x.id}</option>)}
-              </select>
+              <input style={{ ...s.input, flex: 2 }} type="password" autoComplete="off" value={p.url}
+                placeholder={p.secretId ? "Saved. Paste a new URL to change it" : "http://user:password@host:port"}
+                onChange={(e) => { setNote(null); setProxies(proxies.map((x, j) => (j === i ? { ...x, url: e.target.value, check: null } : x))); }} />
+              <button style={s.button} disabled={p.testing || (!p.url.trim() && !p.secretId)} onClick={async () => {
+                setProxies((list) => list.map((x) => (x.id === p.id ? { ...x, testing: true } : x)));
+                const check = (await testProxy(p.url.trim() ? { companyId, url: p.url } : { companyId, proxyId: p.id }).catch((e) => ({ ok: false, error: errText(e), ms: 0 }))) as ProxyResult;
+                setProxies((list) => list.map((x) => (x.id === p.id ? { ...x, testing: false, check } : x)));
+              }}>{p.testing ? "Testing…" : "Test"}</button>
               <button style={s.button} onClick={() => { setNote(null); setProxies(proxies.filter((_, j) => j !== i)); if (defaultProxy === p.id) setDefaultProxy("none"); }}>Remove</button>
             </div>
-          ))}
+          )).flatMap((row, i) => {
+            const p = proxies[i];
+            const shown = p.check ?? (p.url.trim() ? null : setup.data?.proxies?.[p.id] ?? null);
+            return [row, shown ? (
+              <div key={`${p.id}-check`} style={{ fontSize: 12.5, marginTop: -2, ...(shown.ok ? s.ok : s.bad) }}>
+                {shown.ok ? `✓ Working: sites see ${shown.ip} (${(shown.ms / 1000).toFixed(1)} s)` : `✗ ${shown.error}${p.check ? "" : " Computers using it go out over their own connection until it works again."}`}
+              </div>
+            ) : null];
+          })}
           <div style={s.row}>
-            <button style={s.button} onClick={() => setProxies([...proxies, { id: `proxy-${Math.random().toString(36).slice(2, 10)}`, name: "", secretId: "" }])}>{proxies.length ? "Add another proxy" : "Add a proxy"}</button>
+            <button style={s.button} onClick={() => setProxies([...proxies, { id: `proxy-${Math.random().toString(36).slice(2, 10)}`, name: "", secretId: "", url: "" }])}>{proxies.length ? "Add another proxy" : "Add a proxy"}</button>
             {proxies.length ? <><span style={s.help}>Default for every computer:</span><ProxyPick value={defaultProxy} onChange={(v) => { setNote(null); setDefaultProxy(v); }} proxies={proxies} withDefault={false} /></> : null}
           </div>
         </div>

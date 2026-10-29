@@ -65,3 +65,52 @@ export function addressFor(input: string): string {
   if (!/\s/.test(v) && /^(localhost|[\w-]+(\.[\w-]+)+)(:\d+)?(\/.*)?$/i.test(v)) return `https://${v}`;
   return `https://www.google.com/search?q=${encodeURIComponent(v)}`;
 }
+
+export type ProxyCheck = { ok: true; ip: string; ms: number } | { ok: false; error: string; ms: number };
+
+/**
+ * Whether a proxy works: connect to it, ask it for a tunnel to a "what is my address" service, and
+ * read the address the world sees. HTTP proxies (and HTTPS ones); the password goes only to the proxy.
+ */
+export async function checkProxy(proxyUrl: string, target = { host: "api.ipify.org", port: 443, tls: true }, timeoutMs = 15_000): Promise<ProxyCheck> {
+  const { connect } = await import("node:net");
+  const tls = await import("node:tls");
+  const started = Date.now();
+  const fail = (error: string): ProxyCheck => ({ ok: false, error, ms: Date.now() - started });
+  let u: URL;
+  try { u = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(proxyUrl.trim()) ? proxyUrl.trim() : `http://${proxyUrl.trim()}`); } catch { return fail("That is not a proxy address (http://user:password@host:port)."); }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return fail(`${u.protocol.replace(":", "")} proxies are not supported; use an HTTP proxy address.`);
+  const port = Number(u.port || (u.protocol === "https:" ? 443 : 80));
+  return new Promise<ProxyCheck>((resolve) => {
+    let done = false;
+    const finish = (r: ProxyCheck) => { if (done) return; done = true; clearTimeout(timer); sock.destroy(); resolve(r); };
+    const timer = setTimeout(() => finish(fail(`No answer within ${Math.round(timeoutMs / 1000)} seconds.`)), timeoutMs);
+    const sock = u.protocol === "https:" ? tls.connect({ host: u.hostname, port, servername: u.hostname }) : connect(port, u.hostname);
+    sock.once("error", (e: Error & { code?: string }) => finish(fail(e.code === "ENOTFOUND" ? `The proxy's host "${u.hostname}" was not found.` : e.code === "ECONNREFUSED" ? "The proxy refused the connection (wrong host or port?)." : `Could not reach the proxy: ${e.message}`)));
+    sock.once(u.protocol === "https:" ? "secureConnect" : "connect", () => {
+      const auth = u.username ? `Proxy-Authorization: Basic ${Buffer.from(`${decodeURIComponent(u.username)}:${decodeURIComponent(u.password)}`).toString("base64")}\r\n` : "";
+      sock.write(`CONNECT ${target.host}:${target.port} HTTP/1.1\r\nHost: ${target.host}:${target.port}\r\n${auth}\r\n`);
+    });
+    let head = Buffer.alloc(0);
+    const onHead = (chunk: Buffer) => {
+      head = Buffer.concat([head, chunk]);
+      const end = head.indexOf("\r\n\r\n");
+      if (end === -1) return;
+      sock.off("data", onHead);
+      const status = Number(/^HTTP\/1\.[01] (\d{3})/.exec(head.subarray(0, end).toString())?.[1] ?? 0);
+      if (status === 407) return finish(fail("The proxy refused the username or password."));
+      if (status !== 200) return finish(fail(`The proxy would not open a connection (answered ${status || "something unexpected"}).`));
+      const pipe = target.tls ? tls.connect({ socket: sock, servername: target.host }) : sock;
+      let body = "";
+      pipe.once("error", (e: Error) => finish(fail(`Connected to the proxy, but not through it: ${e.message}`)));
+      pipe.on("data", (d: Buffer) => {
+        body += d.toString();
+        const m = /\r\n\r\n([\s\S]*)$/.exec(body);
+        const ip = m?.[1].trim().match(/^[0-9a-f.:]+$/i)?.[0];
+        if (ip) finish({ ok: true, ip, ms: Date.now() - started });
+      });
+      pipe.write(`GET / HTTP/1.1\r\nHost: ${target.host}\r\nConnection: close\r\n\r\n`);
+    };
+    sock.on("data", onHead);
+  });
+}

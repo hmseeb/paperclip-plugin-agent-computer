@@ -1,7 +1,7 @@
 import { definePlugin, runWorker, type PluginContext } from "@paperclipai/plugin-sdk";
 import { createHmac } from "node:crypto";
 import { handle, type Target, type HowTo } from "./actions.ts";
-import { addressFor, Computer, egressFor } from "./computer.ts";
+import { addressFor, checkProxy, Computer, egressFor, type ProxyCheck } from "./computer.ts";
 import { HELP } from "./help.ts";
 import { Leases, mayUse, proxyChoice, sharedComputers, summarize, type Demonstration, type SharedComputer, type Step } from "./learning.ts";
 
@@ -26,7 +26,13 @@ interface Tenant {
   /** Open help and password requests, for the overlay, and when each computer was last used by its agent. */
   pending: Map<string, { agentId: string; agentName: string; computer: string | null; kind: string; reason: string; at: number }>;
   lastUsed: Map<string, number>;
+  /** Named proxies, and how each did when last checked. A proxy that is down is skipped (direct) until it is back. */
+  proxies: Map<string, { name: string; url: string }>;
+  proxyHealth: Map<string, ProxyCheck & { at: number }>;
+  proxyFor(bot: string): string | null;
+  timers: ReturnType<typeof setInterval>[];
 }
+const PROXY_CHECK_MS = 60_000;
 const tenants = new Map<string, Tenant>();
 
 async function start(companyId: string, config: Record<string, unknown>): Promise<Tenant | null> {
@@ -39,29 +45,43 @@ async function start(companyId: string, config: Record<string, unknown>): Promis
   }
   // Proxies: each a Paperclip secret holding a proxy URL (http://user:pass@host:port), resolved now so
   // no request waits on it. The URL goes only to the computer, never into logs or answers.
-  const proxies = new Map<string, string>();
-  const list = Array.isArray(config.proxies) ? (config.proxies as { id?: string; url?: unknown }[]) : [];
+  const proxies = new Map<string, { name: string; url: string }>();
+  const list = Array.isArray(config.proxies) ? (config.proxies as { id?: string; name?: string; url?: unknown }[]) : [];
   for (const [i, p] of list.entries()) {
     if (!p?.id || !p.url) continue;
     // Bound to the plugin by its place in the settings (proxies.0.url), which is what the host checks.
     const url = await ctx.secrets.resolve(p.url as string, { companyId, configPath: `proxies.${i}.url` })
       .catch((err) => { ctx.logger.warn("a proxy secret could not be read", { companyId, proxy: p.id, err: errText(err) }); return ""; });
-    if (url) proxies.set(p.id, url);
+    if (url) proxies.set(p.id, { name: p.name ?? p.id, url });
   }
   const agentProxy = (config.agentProxies && typeof config.agentProxies === "object" ? config.agentProxies : {}) as Record<string, string>;
   const defaultProxy = typeof config.defaultProxy === "string" ? config.defaultProxy : undefined;
   const shared = sharedComputers(config);
+  const proxyFor = (bot: string) => proxyChoice(shared.find((b) => b.id === bot)?.proxy ?? agentProxy[bot], defaultProxy);
+  const proxyHealth = new Map<string, ProxyCheck & { at: number }>();
+  // Down: the host's own connection instead, so a dead proxy never stops a computer working.
   const upstream = (bot: string) => {
-    const id = proxyChoice(shared.find((b) => b.id === bot)?.proxy ?? agentProxy[bot], defaultProxy);
-    return id ? proxies.get(id) ?? null : null;
+    const id = proxyFor(bot);
+    return id && proxyHealth.get(id)?.ok !== false ? proxies.get(id)?.url ?? null : null;
   };
   const old = tenants.get(companyId);
+  for (const timer of old?.timers ?? []) clearInterval(timer);
+  const checkAll = async () => {
+    for (const [id, p] of proxies) {
+      const r = await checkProxy(p.url).catch((err) => ({ ok: false as const, error: errText(err), ms: 0 }));
+      const before = proxyHealth.get(id)?.ok;
+      proxyHealth.set(id, { ...r, at: Date.now() });
+      if (before !== r.ok) ctx.logger[r.ok ? "info" : "warn"](r.ok ? "a proxy is working; computers use it again" : "a proxy is down; computers using it go out directly until it is back", { companyId, proxy: p.name, ...(r.ok ? {} : { err: (r as { error: string }).error }) });
+    }
+  };
+  void checkAll();
   const t: Tenant = {
     computer: new Computer(url, token, fetch, upstream), token, sites, shared,
     gatewayUrl: (typeof config.gatewayUrl === "string" && config.gatewayUrl.trim()) || "http://agent-computer-gateway:4200",
     // Leases and takeovers survive a settings save.
     leases: old?.leases ?? new Leases(), takenAt: old?.takenAt ?? new Map(), chrome: old?.chrome ?? new Map(),
     pending: old?.pending ?? new Map(), lastUsed: old?.lastUsed ?? new Map(),
+    proxies, proxyHealth, proxyFor, timers: proxies.size ? [setInterval(() => void checkAll(), PROXY_CHECK_MS)] : [],
     // Signs live-screen tickets; gateway/gateway.ts derives the same key from the same token.
     ticketKey: createHmac("sha256", token).update("agent-computer stream tickets").digest(),
   };
@@ -117,9 +137,21 @@ const plugin = definePlugin({
       const t = await tenant(companyId).catch(() => null);
       if (!t) return { connected: false, status: "Not set up: fill in the computer URL and token, then save." };
       const h = await t.computer.health().then(() => "Connected to the computer.").catch((err) => `Cannot reach the computer: ${errText(err)}`);
-      return { connected: h.startsWith("Connected"), status: h };
+      const proxies = Object.fromEntries([...t.proxies.keys()].map((id) => [id, t.proxyHealth.get(id) ?? null]));
+      return { connected: h.startsWith("Connected"), status: h, proxies };
     });
     ctx.actions.register("skill", async (params) => ({ key: await ensureSkill(String(params.companyId)) }));
+    // Settings: try a proxy, a pasted URL before it is saved or a saved one by id.
+    ctx.actions.register("test-proxy", async (params, context) => {
+      if (context.actor.type !== "user") throw new Error("Only people can test proxies.");
+      if (typeof params.url === "string" && params.url.trim()) return checkProxy(params.url);
+      const t = await tenant(String(params.companyId ?? ""));
+      const p = t?.proxies.get(String(params.proxyId ?? ""));
+      if (!t || !p) return { ok: false, error: "Save this proxy first, or paste its URL to test it.", ms: 0 };
+      const r = await checkProxy(p.url);
+      t.proxyHealth.set(String(params.proxyId), { ...r, at: Date.now() });
+      return r;
+    });
     // A new version's skill text reaches the companies already set up, without waiting for a settings save.
     setTimeout(() => {
       void ctx.state.get(BOOT).then((all) => Promise.all(Object.keys((all as Record<string, unknown> | null) ?? {}).map((id) => ensureSkill(id))))
@@ -252,7 +284,21 @@ const plugin = definePlugin({
       const url = typeof params.url === "string" ? params.url.trim() : "";
       if (!url) throw new Error("Type an address.");
       await hold(t, bot, sites);
-      const r = await t.computer.call<{ url?: string }>(bot, "POST", "/human/navigate", { url: addressFor(url) });
+      const go = () => t.computer.call<{ url?: string }>(bot, "POST", "/human/navigate", { url: addressFor(url) });
+      const r = await go().catch(async (err) => {
+        // Through a proxy that just died: check it, and if it is down, retry over the computer's own connection.
+        const id = t.proxyFor(bot);
+        const p = id ? t.proxies.get(id) : undefined;
+        if (!id || !p) throw err; // any failed load: check the proxy (Chrome words a dead one several ways)
+        if (t.proxyHealth.get(id)?.ok !== false) {
+          const c = await checkProxy(p.url);
+          t.proxyHealth.set(id, { ...c, at: Date.now() });
+          if (c.ok) throw err;
+        }
+        await t.computer.egress(bot, egressFor(sites));
+        await new Promise((r) => setTimeout(r, 1500)); // Chrome takes a moment to drop the dead route
+        return go().catch(async () => { await new Promise((r) => setTimeout(r, 1500)); return go(); });
+      });
       chromeStep(t, bot, { at: Date.now(), kind: "open", url: r.url ?? addressFor(url) });
       return r;
     });
@@ -323,6 +369,16 @@ const plugin = definePlugin({
       async computers(id) {
         return [{ name: "your own", shared: false, inUseBy: null },
           ...await Promise.all(t.shared.filter((b) => mayUse(b, id)).map(async (b) => ({ name: b.name, shared: true, inUseBy: await nameOf(t.leases.holder(b.id)) })))];
+      },
+      async proxyFailed(bot) {
+        const id = t.proxyFor(bot);
+        const p = id ? t.proxies.get(id) : undefined;
+        if (!id || !p) return false;
+        if (t.proxyHealth.get(id)?.ok === false) return true; // known down: already going direct, just retry
+        const r = await checkProxy(p.url);
+        t.proxyHealth.set(id, { ...r, at: Date.now() });
+        if (!r.ok) ctx.logger.warn("a proxy is down; computers using it go out directly until it is back", { companyId, proxy: p.name, err: r.error });
+        return !r.ok;
       },
       async release(id, name) {
         const b = findShared(t, name);

@@ -6,7 +6,7 @@ const route = (routeKey: string, method: "GET" | "POST", path: string) => ({ rou
 const manifest: PaperclipPluginManifestV1 = {
   id: "agent-computer",
   apiVersion: 1,
-  version: "0.4.0",
+  version: "0.5.0",
   displayName: "Agent computer",
   description: "A computer per agent that keeps its logins, plus shared computers. Watch them live on the Computers page, take over for logins and 2FA, type passwords the agent never sees, and teach agents by doing.",
   author: "Haseeb Azhar",
