@@ -234,7 +234,7 @@ function LiveView({ companyId, agentId }: { companyId: string; agentId: string }
             <div key={t.index} style={{ display: "flex", alignItems: "center", gap: 6, maxWidth: 220, minWidth: 0, padding: "6px 8px 6px 12px", borderRadius: "8px 8px 0 0", fontSize: 12.5, cursor: "pointer", background: t.active ? "rgba(127,127,127,.08)" : "transparent", opacity: t.active ? 1 : 0.7 }}
               onClick={() => { if (!t.active) void run(() => tab({ companyId, agentId, action: "select", index: t.index })); }} title={t.url}>
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>{t.title || (t.url === "about:blank" ? "New tab" : t.url)}</span>
-              {(view?.tabs.length ?? 0) > 1 ? <button aria-label="Close tab" style={chrome} onClick={(e) => { e.stopPropagation(); void run(() => tab({ companyId, agentId, action: "close", index: t.index })); }}>×</button> : null}
+              <button aria-label="Close tab" title="Close tab" style={chrome} onClick={(e) => { e.stopPropagation(); void run(() => tab({ companyId, agentId, action: "close", index: t.index })); }}>×</button>
             </div>
           ))}
           <button aria-label="New tab" title="New tab" style={{ ...chrome, margin: "0 0 4px 4px" }} disabled={busy} onClick={() => run(() => tab({ companyId, agentId, action: "new" }))}>+</button>
@@ -260,7 +260,7 @@ function LiveView({ companyId, agentId }: { companyId: string; agentId: string }
             <button style={s.button} disabled={busy || !view} onClick={() => run(() => control({ companyId, agentId, op: "take" }))}>Take over</button>
           )}
         </div>
-        <div style={{ position: "relative" }}>
+        <div style={{ position: "relative", background: "rgba(127,127,127,.18)" }}>
           <LiveScreen ticket={ticket} driving={mine} onProblem={onProblem} />
           {!url && !problem ? <div style={{ position: "absolute", inset: 0, display: "grid", placeItems: "center", color: "#666", fontSize: 14, pointerEvents: "none" }}>Nothing open yet. Type an address above (you take over), or wait for the agent.</div> : null}
         </div>

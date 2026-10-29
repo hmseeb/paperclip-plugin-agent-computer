@@ -130,7 +130,14 @@ const plugin = definePlugin({
       person(context);
       const { t, agent } = await forTab(params);
       await hold(t, agent.id);
-      return t.computer.call(agent.id, "POST", "/human/tabs", { action: String(params.action), index: typeof params.index === "number" ? params.index : undefined });
+      const action = String(params.action);
+      const index = typeof params.index === "number" ? params.index : undefined;
+      if (action === "close") {
+        // Closing the last tab leaves a blank one, as a browser window would, rather than refusing.
+        const { tabs } = await t.computer.call<{ tabs: unknown[] }>(agent.id, "GET", "/tabs");
+        if (tabs.length <= 1) await t.computer.call(agent.id, "POST", "/human/tabs", { action: "new" });
+      }
+      return t.computer.call(agent.id, "POST", "/human/tabs", { action, index });
     });
     // A password for the field the agent pointed at. Typed into the page and dropped: never logged, stored or returned.
     ctx.actions.register("secret", async (params, context) => {

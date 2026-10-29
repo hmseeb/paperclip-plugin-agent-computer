@@ -45,6 +45,7 @@ export function LiveScreen({ ticket, driving, onProblem }: Props) {
   const frameSize = useRef<{ width: number; height: number } | null>(null);
   const latestId = useRef(0);
   const [connected, setConnected] = useState(false);
+  const [frameWidth, setFrameWidth] = useState(1280);
 
   useEffect(() => {
     let stopped = false;
@@ -59,6 +60,7 @@ export function LiveScreen({ ticket, driving, onProblem }: Props) {
         if (stopped || id !== latestId.current || !canvas || document.visibilityState !== "visible") { bitmap.close(); return; }
         canvas.width = bitmap.width;
         canvas.height = bitmap.height;
+        setFrameWidth(bitmap.width);
         canvas.getContext("2d")?.drawImage(bitmap, 0, 0);
         bitmap.close();
       } catch { /* a corrupt frame; the next replaces it */ }
@@ -214,7 +216,8 @@ export function LiveScreen({ ticket, driving, onProblem }: Props) {
       ref={canvasRef}
       width={1280}
       height={800}
-      style={{ display: "block", width: "100%", height: "auto", background: "#fff", cursor: driving ? "default" : "not-allowed" }}
+      // At most its real size, centred: a popup (a 500px sign-in window) shows as a window, not stretched.
+      style={{ display: "block", width: "100%", maxWidth: frameWidth, height: "auto", margin: "0 auto", background: "#fff", cursor: driving ? "default" : "not-allowed" }}
       {...(driving ? { onMouseDown: onMouse("pressed"), onMouseUp: onMouse("released"), onMouseMove: onMouse("moved"), onContextMenu: (e: React.MouseEvent) => e.preventDefault() } : {})}
       aria-label={driving ? "The agent's browser. You have control: click and type here." : "The agent's browser, live"}
     />
