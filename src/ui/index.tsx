@@ -63,7 +63,7 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
   const [shared, setShared] = useState<{ id: string; name: string; allAgents: boolean; agents: string[]; sites: string; proxy?: string }[]>([]);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
   const [saving, setSaving] = useState(false);
-  const setup = usePluginData<{ connected: boolean; status: string; proxies?: Record<string, (ProxyResult & { at: number }) | null> }>("setup", { companyId });
+  const setup = usePluginData<{ connected: boolean; status: string; versionNote?: string | null; proxies?: Record<string, (ProxyResult & { at: number }) | null> }>("setup", { companyId });
   const skill = usePluginAction("skill");
 
   useEffect(() => {
@@ -148,9 +148,13 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
 
   return (
     <div style={{ maxWidth: 760 }}>
-      <div style={{ ...s.help, marginBottom: 18, ...(setup.data?.connected ? s.ok : {}) }}>● {setup.data?.status ?? "Checking the computer…"}</div>
+      <div style={{ ...s.help, marginBottom: 18, ...(setup.data?.connected ? s.ok : {}) }}>● {setup.data?.status ?? "Checking the computer…"}
+        {setup.data?.versionNote ? <div style={{ color: "#c98a00", marginTop: 4 }}>Note: this plugin was {setup.data.versionNote}.</div> : null}</div>
       <Field label="Computer URL" help="Where Paperclip reaches the agent computer. On the same Docker network as Paperclip this is usually http://agent-computer:4100.">
         <input style={s.input} value={String(config.computerUrl ?? "")} onChange={(e) => set({ computerUrl: e.target.value })} placeholder="http://agent-computer:4100" />
+      </Field>
+      <Field label="Live screen address" help="Where people's browsers reach the live-screen gateway. Leave empty when your Paperclip address sends /_computer/ to the gateway (a path rule in your proxy or tunnel); otherwise the gateway's own address, e.g. https://computer.example.com.">
+        <input style={s.input} value={String(config.screenUrl ?? "")} onChange={(e) => set({ screenUrl: e.target.value.trim() })} placeholder="Same as Paperclip (/_computer/)" />
       </Field>
       <Field label="Computer token" help="A Paperclip secret holding the computer's COMPUTER_TOKEN. Only this plugin uses it; agents and people never see it.">
         <select style={s.input} value={token?.secretId ?? ""} onChange={(e) => set({ computerToken: e.target.value ? { type: "secret_ref", version: "latest", secretId: e.target.value } : undefined })}>
@@ -404,7 +408,7 @@ function LiveView({ companyId, agentId, autoTake = false }: { companyId: string;
     return () => { live = false; };
   }, [refresh]);
 
-  const ticket = useCallback(async () => ((await streamTicket({ companyId, agentId })) as { path: string }).path, [companyId, agentId]);
+  const ticket = useCallback(async () => { const t = (await streamTicket({ companyId, agentId })) as { path: string; base: string | null }; return `${t.base ?? ""}${t.path}`; }, [companyId, agentId]);
   const autoTook = useRef(false);
   useEffect(() => {
     const c = view?.control;
@@ -538,7 +542,7 @@ export function ComputerOverlay({ context }: PluginSidebarProps) {
   const target = ask ? { bot: ask.bot, agentName: ask.agentName } : active;
   const key = ask ? keyOf(ask) : target ? `${target.bot}:active` : null;
   const bot = target?.bot ?? "";
-  const ticket = useCallback(async () => ((await streamTicket({ companyId, agentId: bot })) as { path: string }).path, [companyId, bot]);
+  const ticket = useCallback(async () => { const t = (await streamTicket({ companyId, agentId: bot })) as { path: string; base: string | null }; return `${t.base ?? ""}${t.path}`; }, [companyId, bot]);
   const onProblem = useCallback((p: string | null) => setProblem(p), []);
   if (!companyId) return null;
   if (expanded) {

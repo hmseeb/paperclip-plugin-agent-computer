@@ -7,6 +7,27 @@ import { detached } from "./detach.ts";
 import { abandoned, Leases, mayUse, proxyChoice, sharedComputers, summarize, type Demonstration, type SharedComputer, type Step } from "./learning.ts";
 
 let ctx: PluginContext;
+
+declare const __BUILT_FOR_PAPERCLIP__: string;
+const BUILT_FOR = typeof __BUILT_FOR_PAPERCLIP__ === "string" ? __BUILT_FOR_PAPERCLIP__ : "";
+/** Set when this server runs a different Paperclip than the plugin was built and tested against. */
+let versionNote: string | null = null;
+
+/** Paperclip's own address inside its container (its PORT), for reading its version. */
+async function localBaseUrl(): Promise<string> {
+  const { readFile } = await import("node:fs/promises");
+  const raw = await readFile(`/proc/${process.ppid}/environ`, "utf8").catch(() => "");
+  const port = raw.split("\0").find((p) => p.startsWith("PORT="))?.slice(5);
+  return `http://127.0.0.1:${port || "3100"}`;
+}
+
+async function checkVersion(): Promise<void> {
+  const health = await fetch(`${await localBaseUrl()}/api/health`, { signal: AbortSignal.timeout(10_000) }).then((r) => r.json() as Promise<{ commit?: string }>);
+  if (BUILT_FOR && health.commit && health.commit !== BUILT_FOR) {
+    versionNote = `built and tested for Paperclip ${BUILT_FOR.slice(0, 7)}, this server runs ${health.commit.slice(0, 7)}; most features keep working, report problems at https://github.com/hmseeb/paperclip-plugin-agent-computer/issues`;
+    ctx.logger.warn(`Agent computer plugin ${versionNote}`);
+  }
+}
 const errText = (err: unknown) => String((err as Error)?.message ?? err);
 // Every company's settings, kept so a worker restarted without a config replay still serves them.
 const BOOT = { scopeKind: "instance" as const, namespace: "computer", stateKey: "boot" };
@@ -15,6 +36,8 @@ const NEW_TAB_PAGE = "https://www.google.com/";
 
 interface Tenant {
   computer: Computer;
+  /** Where browsers reach the live-screen gateway; empty: Paperclip's own domain, under /_computer/. */
+  screenUrl: string;
   token: string;
   gatewayUrl: string;
   sites: Map<string, string[]>;
@@ -85,6 +108,7 @@ async function start(companyId: string, config: Record<string, unknown>): Promis
   detached(() => void checkAll());
   const t: Tenant = {
     computer: new Computer(url, token, fetch, upstream), token, sites, shared,
+    screenUrl: typeof config.screenUrl === "string" ? config.screenUrl.trim().replace(/\/+$/, "") : "",
     gatewayUrl: (typeof config.gatewayUrl === "string" && config.gatewayUrl.trim()) || "http://agent-computer-gateway:4200",
     // Leases and takeovers survive a settings save.
     leases: old?.leases ?? new Leases(), takenAt: old?.takenAt ?? new Map(), chrome: old?.chrome ?? new Map(),
@@ -172,10 +196,10 @@ const plugin = definePlugin({
     ctx.data.register("setup", async (params) => {
       const companyId = String(params.companyId ?? "");
       const t = await tenant(companyId).catch(() => null);
-      if (!t) return { connected: false, status: "Not set up: fill in the computer URL and token, then save." };
+      if (!t) return { connected: false, status: "Not set up: fill in the computer URL and token, then save.", versionNote };
       const h = await t.computer.health().then(() => "Connected to the computer.").catch((err) => `Cannot reach the computer: ${errText(err)}`);
       const proxies = Object.fromEntries([...t.proxies.keys()].map((id) => [id, t.proxyHealth.get(id) ?? null]));
-      return { connected: h.startsWith("Connected"), status: h, proxies, fallback: t.fallback };
+      return { connected: h.startsWith("Connected"), status: h, proxies, fallback: t.fallback, versionNote };
     });
     ctx.actions.register("skill", async (params) => ({ key: await ensureSkill(String(params.companyId)) }));
     // Steering from the Mattermost plugin: a person wrote to an agent mid-run; its computer wait ends early.
@@ -194,6 +218,7 @@ const plugin = definePlugin({
       t.proxyHealth.set(String(params.proxyId), { ...r, at: Date.now() });
       return r;
     });
+    detached(() => void checkVersion().catch(() => {}));
     // A new version's skill text reaches the companies already set up, without waiting for a settings save.
     detached(() => setTimeout(() => {
       void ctx.state.get(BOOT).then((all) => Promise.all(Object.keys((all as Record<string, unknown> | null) ?? {}).map((id) => ensureSkill(id))))
@@ -316,7 +341,7 @@ const plugin = definePlugin({
       const { t, bot } = await forTab(params);
       const exp = String(Math.floor(Date.now() / 1000) + 60);
       const sig = createHmac("sha256", t.ticketKey).update(`${bot}.${exp}`).digest("hex");
-      return { path: `/_computer/stream?agent=${bot}&exp=${exp}&sig=${sig}` };
+      return { path: `/_computer/stream?agent=${bot}&exp=${exp}&sig=${sig}`, base: t.screenUrl || null };
     });
     // The browser chrome: address bar, back, forward, reload and tabs. They act as the person, so a
     // person who does not hold the browser yet takes it first, as they would to click on the page.
@@ -488,7 +513,8 @@ const plugin = definePlugin({
     if (!tenants.size) return { status: "ok", message: "No company has set up the agent computer yet." };
     const parts = await Promise.all([...tenants].map(([id, t]) => t.computer.health().then(() => "reachable").catch((err) => `${id.slice(0, 8)}: ${errText(err)}`)));
     const bad = parts.filter((p) => p !== "reachable");
-    return { status: bad.length ? "degraded" : "ok", message: bad.length ? bad.join(" | ") : `computer reachable for ${parts.length} companies` };
+    const note = versionNote ? ` | Note: this plugin was ${versionNote}` : "";
+    return { status: bad.length ? "degraded" : "ok", message: (bad.length ? bad.join(" | ") : `computer reachable for ${parts.length} companies`) + note };
   },
 });
 

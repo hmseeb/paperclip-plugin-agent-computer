@@ -1,0 +1,38 @@
+# The two containers the Agent computer plugin talks to. Add them to the compose project that runs
+# Paperclip, so they share its network (the plugin reaches http://agent-computer:4100 and
+# http://agent-computer-gateway:4200 by name).
+#
+# Make a token first and keep it in a file only you can read:
+#   ( umask 077; echo "COMPUTER_TOKEN=$(openssl rand -hex 32)" > agent-computer.env )
+# Then put the same value in a Paperclip secret, and choose that secret as the plugin's
+# "Computer token".
+services:
+  agent-computer:
+    image: ghcr.io/hmseeb/agent-computer:latest
+    restart: unless-stopped
+    env_file: agent-computer.env
+    environment:
+      COMPUTER_SEPARATE_WORKSPACES: "on"
+      SCREENCAST_QUALITY: "40" # lower is smaller and faster over a slow link
+    volumes:
+      - agent-computer-profiles:/profiles # each computer's logins and history
+      - agent-computer-workspace:/workspace
+    shm_size: 1g
+    mem_limit: 3g
+
+  agent-computer-gateway:
+    image: ghcr.io/hmseeb/agent-computer-gateway:latest
+    restart: unless-stopped
+    depends_on: [agent-computer]
+    env_file: agent-computer.env
+    environment:
+      COMPUTER_URL: http://agent-computer:4100
+    mem_limit: 256m
+    # People's browsers must reach this one (the live screen). Either route
+    # https://<your paperclip>/_computer/ to it (see the README), or publish it on its own
+    # address and set "Live screen address" in the plugin settings:
+    # ports: ["4200:4200"]
+
+volumes:
+  agent-computer-profiles:
+  agent-computer-workspace:

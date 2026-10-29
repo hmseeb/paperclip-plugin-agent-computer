@@ -6,7 +6,7 @@ const route = (routeKey: string, method: "GET" | "POST", path: string) => ({ rou
 const manifest: PaperclipPluginManifestV1 = {
   id: "agent-computer",
   apiVersion: 1,
-  version: "0.6.1",
+  version: "0.7.0",
   displayName: "Agent computer",
   description: "A computer per agent that keeps its logins, plus shared computers. Watch them live on the Computers page, take over for logins and 2FA, type passwords the agent never sees, and teach agents by doing.",
   author: "Haseeb Azhar",
@@ -55,6 +55,7 @@ const manifest: PaperclipPluginManifestV1 = {
     properties: {
       computerUrl: { type: "string", title: "Computer URL", description: "Where Paperclip reaches the agent computer, e.g. http://agent-computer:4100" },
       computerToken: { format: "secret-ref", title: "Computer token", description: "A Paperclip secret holding the computer's COMPUTER_TOKEN." },
+      screenUrl: { type: "string", title: "Live screen address", description: "Where people's browsers reach the live-screen gateway, e.g. https://computer.example.com. Empty: Paperclip's own address, with /_computer/ routed to the gateway." },
       gatewayUrl: { type: "string", title: "Live screen gateway URL", description: "Where the plugin reads recorded steps from the gateway. Default http://agent-computer-gateway:4200" },
       proxies: {
         type: "array", title: "Proxies",

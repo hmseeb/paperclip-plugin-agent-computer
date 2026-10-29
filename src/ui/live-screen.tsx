@@ -71,7 +71,8 @@ export function LiveScreen({ ticket, driving, onProblem }: Props) {
       let path: string;
       try { path = await ticket(); } catch (e) { onProblem(String((e as Error)?.message ?? e)); return retry(); }
       if (stopped) return;
-      const socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${path}`);
+      // A full address (the gateway on its own domain) or a path on this one.
+      const socket = new WebSocket(/^https?:\/\//.test(path) ? path.replace(/^http/, "ws") : `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${path}`);
       socketRef.current = socket;
       socket.onopen = () => { if (socketRef.current === socket) { setConnected(true); onProblem(null); } };
       socket.onmessage = (event) => {

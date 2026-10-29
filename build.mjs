@@ -18,7 +18,8 @@ const alias = {
   "@paperclipai/shared": `${SRC}/packages/shared/src/index.ts`,
 };
 const common = { bundle: true, format: "esm", platform: "node", target: "node24", outdir: "dist", alias, logLevel: "info" };
-await esbuild.build({ ...common, entryPoints: ["src/worker.ts"], external: ["react", "react-dom"]});
+// The worker compares this with the commit the server reports, and says so when they differ.
+await esbuild.build({ ...common, entryPoints: ["src/worker.ts"], external: ["react", "react-dom"], define: { __BUILT_FOR_PAPERCLIP__: JSON.stringify(REF) } });
 await esbuild.build({ ...common, entryPoints: ["src/manifest.ts"], external: ["@paperclipai/plugin-sdk"] });
 
 // The settings page and the Computer tab: React and the SDK's UI module come from the host page.

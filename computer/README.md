@@ -15,7 +15,7 @@ chrome a person driving it needs:
   you…" with nothing to click. Sites fall back to password and codes, which happen in the page.
 - Upstream proxies set at runtime per browser (`PUT /egress-policy {policy, upstream}`), winning over
   `EGRESS_PROXY_*`; `null` is direct. The plugin sends each computer's proxy with every policy push.
-- `SCREENCAST_QUALITY` sets the live screen's JPEG quality (Greg's mini: 40).
+- `SCREENCAST_QUALITY` sets the live screen's JPEG quality (default 70; 40 suits a home upload).
 
-On Greg's mini the source and patch live in `~/paperclip/agent-computer/`, and `compose.yml` runs the
-image `agent-computer:cd161d0-human1` plus `agent-computer-gateway` (`../gateway/gateway.ts`).
+The pinned commit is in `OPENBOT_REF`. CI builds the image as `ghcr.io/hmseeb/agent-computer` for amd64
+and arm64 (`.github/workflows/images.yml`); `.github/workflows/test.yml` checks the patch still applies.

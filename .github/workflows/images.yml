@@ -1,0 +1,98 @@
+# Builds the two containers the plugin talks to, for Intel and ARM servers, on each version tag
+# (or by hand), and pushes them to GHCR:
+#   ghcr.io/hmseeb/agent-computer          OpenBot's agent computer (MIT) at computer/OPENBOT_REF,
+#                                          with computer/human-browser.patch applied
+#   ghcr.io/hmseeb/agent-computer-gateway  gateway/gateway.ts
+name: Images
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-latest }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - name: OpenBot at the pinned commit, with the patch
+        run: |
+          git clone -q --filter=blob:none --no-checkout https://github.com/CopilotKit/openbot /tmp/openbot
+          git -C /tmp/openbot checkout -q "$(cat computer/OPENBOT_REF)"
+          git -C /tmp/openbot apply "$PWD/computer/human-browser.patch"
+      - name: Computer
+        uses: docker/build-push-action@v6
+        with:
+          context: /tmp/openbot
+          file: /tmp/openbot/agent-computer/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=OpenBot's agent computer (github.com/CopilotKit/openbot, MIT) with the Paperclip Agent computer patch
+            org.opencontainers.image.licenses=MIT
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/agent-computer,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=computer-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=computer-${{ matrix.arch }}
+        id: computer
+      - name: Gateway
+        uses: docker/build-push-action@v6
+        with:
+          context: gateway
+          platforms: linux/${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=Live-screen gateway for the Paperclip Agent computer plugin
+            org.opencontainers.image.licenses=MIT
+          outputs: type=image,name=ghcr.io/${{ github.repository_owner }}/agent-computer-gateway,push-by-digest=true,name-canonical=true,push=true
+        id: gateway
+      - name: Remember the digests
+        run: |
+          mkdir -p /tmp/digests
+          echo "${{ steps.computer.outputs.digest }}" > /tmp/digests/computer-${{ matrix.arch }}
+          echo "${{ steps.gateway.outputs.digest }}" > /tmp/digests/gateway-${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digests-*
+          merge-multiple: true
+          path: /tmp/digests
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+      - name: One tag for both architectures
+        run: |
+          owner=ghcr.io/${{ github.repository_owner }}
+          version="${GITHUB_REF_NAME#v}"
+          [ "${GITHUB_REF_TYPE}" = tag ] || version="dev-${GITHUB_SHA::7}"
+          for image in computer gateway; do
+            name=$owner/agent-computer; [ $image = gateway ] && name=$owner/agent-computer-gateway
+            tags="-t $name:$version"; [ "${GITHUB_REF_TYPE}" = tag ] && tags="$tags -t $name:latest"
+            docker buildx imagetools create $tags $name@$(cat /tmp/digests/$image-amd64) $name@$(cat /tmp/digests/$image-arm64)
+          done
