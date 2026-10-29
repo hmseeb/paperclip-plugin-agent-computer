@@ -3,7 +3,7 @@ import { createHmac } from "node:crypto";
 import { handle, type Target, type HowTo } from "./actions.ts";
 import { addressFor, checkProxy, Computer, egressFor, type ProxyCheck } from "./computer.ts";
 import { HELP } from "./help.ts";
-import { Leases, mayUse, proxyChoice, sharedComputers, summarize, type Demonstration, type SharedComputer, type Step } from "./learning.ts";
+import { abandoned, Leases, mayUse, proxyChoice, sharedComputers, summarize, type Demonstration, type SharedComputer, type Step } from "./learning.ts";
 
 let ctx: PluginContext;
 const errText = (err: unknown) => String((err as Error)?.message ?? err);
@@ -36,6 +36,7 @@ interface Tenant {
   timers: ReturnType<typeof setInterval>[];
 }
 const PROXY_CHECK_MS = 60_000;
+
 const tenants = new Map<string, Tenant>();
 
 async function start(companyId: string, config: Record<string, unknown>): Promise<Tenant | null> {
@@ -87,12 +88,40 @@ async function start(companyId: string, config: Record<string, unknown>): Promis
     // Leases and takeovers survive a settings save.
     leases: old?.leases ?? new Leases(), takenAt: old?.takenAt ?? new Map(), chrome: old?.chrome ?? new Map(),
     pending: old?.pending ?? new Map(), lastUsed: old?.lastUsed ?? new Map(), steered: old?.steered ?? new Set(),
-    proxies, proxyHealth, proxyFor, fallback, timers: proxies.size ? [setInterval(() => void checkAll(), PROXY_CHECK_MS)] : [],
+    proxies, proxyHealth, proxyFor, fallback, timers: [
+      ...(proxies.size ? [setInterval(() => void checkAll(), PROXY_CHECK_MS)] : []),
+      setInterval(() => void handBackAbandoned(companyId).catch((err) => ctx.logger.warn("abandoned-computer check failed", { companyId, err: errText(err) })), 60_000),
+    ],
     // Signs live-screen tickets; gateway/gateway.ts derives the same key from the same token.
     ticketKey: createHmac("sha256", token).update("agent-computer stream tickets").digest(),
   };
   tenants.set(companyId, t);
   return t;
+}
+
+/**
+ * Computers a person took and walked away from (closed the page without handing back) go back to
+ * their agent, which was otherwise locked out of its own computer indefinitely. What the person did
+ * is kept as a demonstration, as for a normal hand-back.
+ */
+async function handBackAbandoned(companyId: string): Promise<void> {
+  const t = tenants.get(companyId);
+  if (!t) return;
+  const watching = await fetch(`${t.gatewayUrl}/_computer/watching`, { headers: { authorization: `Bearer ${t.token}` }, signal: AbortSignal.timeout(5000) })
+    .then((r) => (r.ok ? r.json() as Promise<{ computers: Record<string, { viewers: number; lastWatched: number | null }>; since: number }> : null)).catch(() => null);
+  if (!watching) return; // without the gateway nothing can be known about who is watching
+  const agents = (await ctx.agents.list({ companyId, limit: 500 })).filter((a) => a.status !== "terminated");
+  for (const bot of [...agents.map((a) => a.id), ...t.shared.map((b) => b.id)]) {
+    const c = await t.computer.call<{ holder?: string; since?: string; request?: { id?: string; reason?: string } }>(bot, "GET", "/control", undefined, 5000).catch(() => null);
+    if (c?.holder !== "human") continue;
+    const w = watching.computers[bot];
+    const heldFor = Date.now() - (Date.parse(c.since ?? "") || Date.now());
+    if (!abandoned({ heldFor, viewers: w?.viewers ?? 0, lastWatched: w?.lastWatched ?? null, gatewayUp: Date.now() - watching.since, now: Date.now() })) continue;
+    const demo = await demonstration(t, bot, c.request?.reason ?? "A person stepped in.").catch(() => null);
+    if (demo) await store(companyId).set(`demo:${bot}`, { ...demo, seenBy: [] });
+    await t.computer.call(bot, "POST", "/control/release", { requestId: c.request?.id ?? "" }).catch(() => undefined);
+    ctx.logger.info("handed a computer back to its agent: a person held it with nobody watching", { companyId, computer: bot, heldMinutes: Math.round(heldFor / 60_000) });
+  }
 }
 
 async function tenant(companyId: string): Promise<Tenant | null> {
@@ -407,7 +436,7 @@ const plugin = definePlugin({
         // The Mattermost plugin listens for this and posts a Take over link: its Paperclip URL + `path`.
         const path = company?.issuePrefix ? `/${company.issuePrefix}/computer?agent=${b.bot}&takeover=1` : null; // opens already taken over
         t.pending.set(b.bot, { agentId: id, agentName: agent?.name ?? "An agent", computer: b.shared ? b.label : null, kind, reason, at: Date.now() });
-        await ctx.events.emit("needs-person", companyId, { agentId: id, agentName: agent?.name ?? null, computer: b.shared ? b.label : null, kind, reason, url, path })
+        await ctx.events.emit("needs-person", companyId, { agentId: id, agentName: agent?.name ?? null, computer: b.shared ? b.label : null, kind, reason, url: url && /^https?:/.test(url) ? url : null, path })
           .catch((err) => ctx.logger.warn("could not announce a help request", { err: errText(err) }));
       },
       async takeDemonstration(bot, id) {

@@ -36,6 +36,8 @@ type Client = Bun.ServerWebSocket<Data>;
  */
 interface Shared { upstream: WebSocket; clients: Set<Client>; last?: string; queue: string[] }
 const streams = new Map<string, Shared>();
+/** When each computer last had someone watching, for handing back computers people walked away from. */
+const lastWatched = new Map<string, number>();
 
 /**
  * What people did in each browser, for the plugin to turn into how-tos. The computer's recorder
@@ -44,6 +46,7 @@ const streams = new Map<string, Shared>();
  */
 const steps = new Map<string, { at: number }[]>();
 const KEEP_MS = 2 * 60 * 60_000;
+const STARTED = Date.now();
 function record(agent: string, action: unknown) {
   const list = steps.get(agent) ?? [];
   const now = Date.now();
@@ -88,10 +91,12 @@ function join(ws: Client) {
     s = shared;
   }
   s.clients.add(ws);
+  lastWatched.set(agent, Date.now());
   if (s.last) { ws.data.inFlight++; ws.send(s.last); }
 }
 
 function leave(ws: Client) {
+  lastWatched.set(ws.data.agent, Date.now());
   const s = streams.get(ws.data.agent);
   if (!s) return;
   s.clients.delete(ws);
@@ -107,6 +112,15 @@ Bun.serve<Data>({
     const url = new URL(req.url);
     if (url.pathname === "/_computer/health") return new Response("ok");
     // The plugin reading recorded steps. Public path, so it needs the computer's own token.
+    // The plugin asking who is watching which computer: people now, and when someone last was.
+    if (url.pathname === "/_computer/watching") {
+      if (!bearer(req)) return new Response("Not authorised.", { status: 401 });
+      const out: Record<string, { viewers: number; lastWatched: number | null }> = {};
+      for (const agent of new Set([...streams.keys(), ...lastWatched.keys()])) {
+        out[agent] = { viewers: streams.get(agent)?.clients.size ?? 0, lastWatched: lastWatched.get(agent) ?? null };
+      }
+      return Response.json({ computers: out, since: STARTED });
+    }
     if (url.pathname === "/_computer/steps") {
       if (!bearer(req)) return new Response("Not authorised.", { status: 401 });
       const since = Number(url.searchParams.get("since") ?? 0);

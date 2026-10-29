@@ -105,3 +105,15 @@ export function proxyChoice(own: string | undefined, fallback: string | undefine
   const pick = own && own !== "default" ? own : fallback;
   return pick && pick !== "none" ? pick : null;
 }
+
+/** A person holding a computer nobody has open for this long has walked away: it goes back to the agent. */
+export const ABANDONED_MS = 5 * 60_000;
+/** Held this long with no record of anyone watching (the gateway restarted since): also back to the agent. */
+export const ABANDONED_UNKNOWN_MS = 10 * 60_000;
+
+/** Whether a person's hold on a computer is abandoned: nobody watching it, for long enough. */
+export function abandoned(a: { heldFor: number; viewers: number; lastWatched: number | null; gatewayUp: number; now: number }): boolean {
+  if (a.viewers > 0) return false;
+  if (a.lastWatched !== null) return a.now - a.lastWatched > ABANDONED_MS && a.heldFor > ABANDONED_MS;
+  return a.heldFor > ABANDONED_UNKNOWN_MS && a.gatewayUp > ABANDONED_MS;
+}

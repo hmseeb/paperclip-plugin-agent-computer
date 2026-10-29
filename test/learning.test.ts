@@ -71,3 +71,14 @@ test("each computer's proxy goes to the computer with its network policy", async
   await c.egress("b", { mode: "allow_all", rules: [] });
   assert.deepEqual(bodies.map((b) => (b as { upstream: unknown }).upstream), ["http://u:p@res:7000", null]);
 });
+
+test("a computer a person walked away from goes back to its agent; one being watched never does", async () => {
+  const { abandoned } = await import("../src/learning.ts");
+  const min = 60_000, now = 100 * min;
+  assert.equal(abandoned({ heldFor: 60 * min, viewers: 1, lastWatched: now, gatewayUp: 60 * min, now }), false, "someone has it open");
+  assert.equal(abandoned({ heldFor: 60 * min, viewers: 0, lastWatched: now - 2 * min, gatewayUp: 60 * min, now }), false, "closed it a moment ago (a reload)");
+  assert.equal(abandoned({ heldFor: 60 * min, viewers: 0, lastWatched: now - 6 * min, gatewayUp: 60 * min, now }), true, "page closed 6 minutes ago");
+  assert.equal(abandoned({ heldFor: 3 * min, viewers: 0, lastWatched: now - 6 * min, gatewayUp: 60 * min, now }), false, "just taken (from Mattermost, page still loading)");
+  assert.equal(abandoned({ heldFor: 35 * min, viewers: 0, lastWatched: null, gatewayUp: 60 * min, now }), true, "no record of anyone watching, held 35 minutes");
+  assert.equal(abandoned({ heldFor: 35 * min, viewers: 0, lastWatched: null, gatewayUp: 2 * min, now }), false, "gateway just restarted: give people time to reconnect");
+});

@@ -1,6 +1,6 @@
 {
   "name": "paperclip-plugin-computer",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Paperclip agents get a real browser that keeps their logins. Watch it live, take over for logins and 2FA, and type passwords the agent never sees.",
   "type": "module",
   "license": "MIT",
