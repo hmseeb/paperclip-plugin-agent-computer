@@ -150,3 +150,12 @@ test("a page that fails through a dead proxy is opened again over the computer's
   const plain = await handle({ ...deps(fake(() => [502, { error: "goto: net::ERR_NAME_NOT_RESOLVED" }]).computer), proxyFailed: async () => false }, "a", "open", { url: "https://nope.test" });
   assert.equal(plain.status, 502, "with the proxy fine (or none), a failed page is just reported");
 });
+
+test("with the fallback set to stop, a dead proxy is reported instead of going out directly", async () => {
+  let navigations = 0;
+  const f = fake((p) => (p === "/navigate" ? (navigations++, [502, { error: "goto: net::ERR_TUNNEL_CONNECTION_FAILED" }]) : [200, {}]));
+  const r = await handle({ ...deps(f.computer), proxyFailed: async () => ({ stopped: "US residential" }) }, "a", "open", { url: "https://example.com" });
+  assert.equal(r.status, 503);
+  assert.match((r.body as { error: string }).error, /"US residential" is not working.*not to go out without it/);
+  assert.equal(navigations, 1, "no direct retry");
+});

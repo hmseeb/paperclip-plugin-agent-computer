@@ -30,6 +30,7 @@ interface Tenant {
   proxies: Map<string, { name: string; url: string }>;
   proxyHealth: Map<string, ProxyCheck & { at: number }>;
   proxyFor(bot: string): string | null;
+  fallback: "direct" | "stop";
   timers: ReturnType<typeof setInterval>[];
 }
 const PROXY_CHECK_MS = 60_000;
@@ -59,10 +60,13 @@ async function start(companyId: string, config: Record<string, unknown>): Promis
   const shared = sharedComputers(config);
   const proxyFor = (bot: string) => proxyChoice(shared.find((b) => b.id === bot)?.proxy ?? agentProxy[bot], defaultProxy);
   const proxyHealth = new Map<string, ProxyCheck & { at: number }>();
-  // Down: the host's own connection instead, so a dead proxy never stops a computer working.
+  // A proxy that is down: by default the computer's own connection instead, so work goes on; with
+  // "stop" it stays on the dead proxy and pages fail, so sites never see the computer's own address.
+  const fallback: "direct" | "stop" = config.proxyFallback === "stop" ? "stop" : "direct";
   const upstream = (bot: string) => {
     const id = proxyFor(bot);
-    return id && proxyHealth.get(id)?.ok !== false ? proxies.get(id)?.url ?? null : null;
+    if (!id) return null;
+    return proxyHealth.get(id)?.ok === false && fallback === "direct" ? null : proxies.get(id)?.url ?? null;
   };
   const old = tenants.get(companyId);
   for (const timer of old?.timers ?? []) clearInterval(timer);
@@ -81,7 +85,7 @@ async function start(companyId: string, config: Record<string, unknown>): Promis
     // Leases and takeovers survive a settings save.
     leases: old?.leases ?? new Leases(), takenAt: old?.takenAt ?? new Map(), chrome: old?.chrome ?? new Map(),
     pending: old?.pending ?? new Map(), lastUsed: old?.lastUsed ?? new Map(),
-    proxies, proxyHealth, proxyFor, timers: proxies.size ? [setInterval(() => void checkAll(), PROXY_CHECK_MS)] : [],
+    proxies, proxyHealth, proxyFor, fallback, timers: proxies.size ? [setInterval(() => void checkAll(), PROXY_CHECK_MS)] : [],
     // Signs live-screen tickets; gateway/gateway.ts derives the same key from the same token.
     ticketKey: createHmac("sha256", token).update("agent-computer stream tickets").digest(),
   };
@@ -138,7 +142,7 @@ const plugin = definePlugin({
       if (!t) return { connected: false, status: "Not set up: fill in the computer URL and token, then save." };
       const h = await t.computer.health().then(() => "Connected to the computer.").catch((err) => `Cannot reach the computer: ${errText(err)}`);
       const proxies = Object.fromEntries([...t.proxies.keys()].map((id) => [id, t.proxyHealth.get(id) ?? null]));
-      return { connected: h.startsWith("Connected"), status: h, proxies };
+      return { connected: h.startsWith("Connected"), status: h, proxies, fallback: t.fallback };
     });
     ctx.actions.register("skill", async (params) => ({ key: await ensureSkill(String(params.companyId)) }));
     // Settings: try a proxy, a pasted URL before it is saved or a saved one by id.
@@ -295,6 +299,7 @@ const plugin = definePlugin({
           t.proxyHealth.set(id, { ...c, at: Date.now() });
           if (c.ok) throw err;
         }
+        if (t.fallback === "stop") throw new Error(`The proxy "${p.name}" is not working, and the plugin settings say not to go out without it. Fix the proxy (or that setting) in the plugin settings.`);
         await t.computer.egress(bot, egressFor(sites));
         await new Promise((r) => setTimeout(r, 1500)); // Chrome takes a moment to drop the dead route
         return go().catch(async () => { await new Promise((r) => setTimeout(r, 1500)); return go(); });
@@ -374,11 +379,15 @@ const plugin = definePlugin({
         const id = t.proxyFor(bot);
         const p = id ? t.proxies.get(id) : undefined;
         if (!id || !p) return false;
-        if (t.proxyHealth.get(id)?.ok === false) return true; // known down: already going direct, just retry
-        const r = await checkProxy(p.url);
-        t.proxyHealth.set(id, { ...r, at: Date.now() });
-        if (!r.ok) ctx.logger.warn("a proxy is down; computers using it go out directly until it is back", { companyId, proxy: p.name, err: r.error });
-        return !r.ok;
+        let down = t.proxyHealth.get(id)?.ok === false;
+        if (!down) {
+          const r = await checkProxy(p.url);
+          t.proxyHealth.set(id, { ...r, at: Date.now() });
+          down = !r.ok;
+          if (down) ctx.logger.warn(`a proxy is down; ${t.fallback === "stop" ? "computers using it stop loading pages" : "computers using it go out directly"} until it is back`, { companyId, proxy: p.name, err: (r as { error?: string }).error });
+        }
+        if (!down) return false;
+        return t.fallback === "stop" ? { stopped: p.name } : true;
       },
       async release(id, name) {
         const b = findShared(t, name);

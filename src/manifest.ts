@@ -6,7 +6,7 @@ const route = (routeKey: string, method: "GET" | "POST", path: string) => ({ rou
 const manifest: PaperclipPluginManifestV1 = {
   id: "agent-computer",
   apiVersion: 1,
-  version: "0.5.0",
+  version: "0.5.1",
   displayName: "Agent computer",
   description: "A computer per agent that keeps its logins, plus shared computers. Watch them live on the Computers page, take over for logins and 2FA, type passwords the agent never sees, and teach agents by doing.",
   author: "Haseeb Azhar",
@@ -60,6 +60,7 @@ const manifest: PaperclipPluginManifestV1 = {
         description: "Named proxies the computers' web traffic can go out through; each URL is kept in a Paperclip secret.",
         items: { type: "object", properties: { id: { type: "string" }, name: { type: "string" }, url: { format: "secret-ref" } }, required: ["id", "name", "url"] },
       },
+      proxyFallback: { type: "string", enum: ["direct", "stop"], default: "direct", title: "When a proxy stops working", description: "direct: computers use their own connection until it is back (work goes on). stop: pages fail until it is back (sites never see the computer's own address)." },
       defaultProxy: { type: "string", title: "Default proxy", description: "A proxy id, or none." },
       agentProxies: { type: "object", title: "Proxy per agent", additionalProperties: { type: "string" } },
       sharedComputers: {

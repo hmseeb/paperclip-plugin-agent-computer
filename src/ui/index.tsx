@@ -58,6 +58,7 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
   const [proxies, setProxies] = useState<ProxyRow[]>([]);
   const testProxy = usePluginAction("test-proxy");
   const [defaultProxy, setDefaultProxy] = useState("none");
+  const [proxyFallback, setProxyFallback] = useState<"direct" | "stop">("direct");
   const [agentProxies, setAgentProxies] = useState<Record<string, string>>({});
   const [shared, setShared] = useState<{ id: string; name: string; allAgents: boolean; agents: string[]; sites: string; proxy?: string }[]>([]);
   const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
@@ -80,6 +81,7 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
         .map((b) => ({ id: b.id, name: b.name, allAgents: b.allAgents !== false, agents: b.agents ?? [], sites: (b.sites ?? []).join(", "), proxy: (b as { proxy?: string }).proxy })));
       setProxies((Array.isArray(c.proxies) ? (c.proxies as { id: string; name?: string; url?: { secretId?: string } }[]) : []).map((x) => ({ id: x.id, name: x.name ?? "", secretId: x.url?.secretId ?? "", url: "" })));
       setDefaultProxy(typeof c.defaultProxy === "string" ? c.defaultProxy : "none");
+      setProxyFallback(c.proxyFallback === "stop" ? "stop" : "direct");
       setAgentProxies((c.agentProxies && typeof c.agentProxies === "object" ? c.agentProxies : {}) as Record<string, string>);
       setSites(Object.fromEntries((Array.isArray(c.sites) ? (c.sites as { agentId: string; sites?: string[] }[]) : []).map((x) => [x.agentId, (x.sites ?? []).join(", ")])));
     }).catch((e) => setNote({ ok: false, text: `Could not load the settings: ${errText(e)}` }));
@@ -122,7 +124,7 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
       setProxies(rows);
       const usable = rows;
       const proxyCfg = { proxies: usable.map((p) => ({ id: p.id, name: p.name.trim(), url: { type: "secret_ref", version: "latest", secretId: p.secretId } })),
-        defaultProxy, agentProxies: Object.fromEntries(Object.entries(agentProxies).filter(([, v]) => v && v !== "default")) };
+        defaultProxy, proxyFallback, agentProxies: Object.fromEntries(Object.entries(agentProxies).filter(([, v]) => v && v !== "default")) };
       const { sharedBrowsers: _old, ...rest } = config!;
       const next = { ...rest, computerUrl: String(config!.computerUrl).trim(), sites: list, sharedComputers, ...proxyCfg };
       await api(`/api/plugins/${PLUGIN}/config`, { method: "POST", body: JSON.stringify({ companyId, configJson: next }) });
@@ -156,7 +158,7 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
           {secrets.map((x) => <option key={x.id} value={x.id}>{x.name || x.key || x.id}</option>)}
         </select>
       </Field>
-      <Field label="Proxies" help={<>Where the computers' web traffic goes out. With none, it goes out from wherever the computer runs, which for a server in a datacentre is a datacentre address that many sites block or challenge. Add a proxy (a residential one, for example): paste its URL, <code>http://user:password@host:port</code>, and test it; it is kept as a Paperclip secret. A proxy that stops working is skipped (computers use their own connection) until it works again. Many residential providers rotate the address on every connection; choose a "sticky session" from them so a computer keeps one address and its logins.</>}>
+      <Field label="Proxies" help={<>Where the computers' web traffic goes out. With none, it goes out from wherever the computer runs, which for a server in a datacentre is a datacentre address that many sites block or challenge. Add a proxy (a residential one, for example): paste its URL, <code>http://user:password@host:port</code>, and test it; it is kept as a Paperclip secret. Proxies are checked every minute; choose below what happens when one stops working. Many residential providers rotate the address on every connection; choose a "sticky session" from them so a computer keeps one address and its logins.</>}>
         <div style={{ display: "grid", gap: 8 }}>
           {proxies.map((p, i) => (
             <div key={p.id} style={s.row}>
@@ -176,7 +178,7 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
             const shown = p.check ?? (p.url.trim() ? null : setup.data?.proxies?.[p.id] ?? null);
             return [row, shown ? (
               <div key={`${p.id}-check`} style={{ fontSize: 12.5, marginTop: -2, ...(shown.ok ? s.ok : s.bad) }}>
-                {shown.ok ? `✓ Working: sites see ${shown.ip} (${(shown.ms / 1000).toFixed(1)} s)` : `✗ ${shown.error}${p.check ? "" : " Computers using it go out over their own connection until it works again."}`}
+                {shown.ok ? `✓ Working: sites see ${shown.ip} (${(shown.ms / 1000).toFixed(1)} s)` : `✗ ${shown.error}${p.check ? "" : proxyFallback === "stop" ? " Computers using it load no pages until it works again." : " Computers using it go out over their own connection until it works again."}`}
               </div>
             ) : null];
           })}
@@ -184,6 +186,19 @@ export function SettingsPage({ context }: PluginSettingsPageProps) {
             <button style={s.button} onClick={() => setProxies([...proxies, { id: `proxy-${Math.random().toString(36).slice(2, 10)}`, name: "", secretId: "", url: "" }])}>{proxies.length ? "Add another proxy" : "Add a proxy"}</button>
             {proxies.length ? <><span style={s.help}>Default for every computer:</span><ProxyPick value={defaultProxy} onChange={(v) => { setNote(null); setDefaultProxy(v); }} proxies={proxies} withDefault={false} /></> : null}
           </div>
+          {proxies.length ? (
+            <div style={{ display: "grid", gap: 6, marginTop: 6 }}>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>When a proxy stops working</div>
+              <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13 }}>
+                <input type="radio" checked={proxyFallback === "direct"} onChange={() => { setNote(null); setProxyFallback("direct"); }} />
+                <span><b>Keep working:</b> computers use their own connection until the proxy is back. Sites see the computer's real address meanwhile, and strict ones may challenge or log it out.</span>
+              </label>
+              <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontSize: 13 }}>
+                <input type="radio" checked={proxyFallback === "stop"} onChange={() => { setNote(null); setProxyFallback("stop"); }} />
+                <span><b>Stop:</b> no pages load until the proxy works again, so sites never see the computer's real address. Agents say why and wait for it to be fixed.</span>
+              </label>
+            </div>
+          ) : null}
         </div>
       </Field>
       <Field label="Agents' computers" help="Per agent: the sites it may reach (empty: any; or a list such as gohighlevel.com, *.msgsndr.com) and the proxy its traffic goes out through.">

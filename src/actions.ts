@@ -27,8 +27,11 @@ export interface ActionDeps {
     teach(agentId: string, name: string, to: string): Promise<string | null>;
   };
   sleep?: (ms: number) => Promise<void>;
-  /** A page failed on a computer with a proxy: true when the proxy is down (calls now go direct), so retry. */
-  proxyFailed?(bot: string): Promise<boolean>;
+  /**
+   * A page failed on a computer with a proxy: true when the proxy is down and calls now go direct (retry);
+   * `{ stopped }` when it is down and the settings say not to go out without it.
+   */
+  proxyFailed?(bot: string): Promise<boolean | { stopped: string }>;
 }
 
 type Result = { status: number; body: unknown };
@@ -93,7 +96,9 @@ export async function handle(d: ActionDeps, agentId: string, routeKey: string, i
         } catch (err) {
           // A dead proxy: switch this computer to its own connection and try once more.
           // Chrome words a dead proxy several ways, so any failed load is a reason to check it (cheap, and only with a proxy).
-          if (!(err instanceof ComputerError && err.status === 502 && await d.proxyFailed?.(b.bot))) throw err;
+          const down = err instanceof ComputerError && err.status === 502 ? await d.proxyFailed?.(b.bot) : false;
+          if (down && typeof down === "object") return bad(503, `Your proxy "${down.stopped}" is not working, and the plugin settings say not to go out without it, so no page will load until it is fixed. Tell the person you are working with; do not look for a way round it.`);
+          if (!down) throw err;
           await c.egress(b.bot, egressFor(b.sites));
           // Chrome takes a moment to drop the dead route, so twice, a little apart.
           const sleep = d.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
