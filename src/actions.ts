@@ -135,6 +135,10 @@ export async function handle(d: ActionDeps, agentId: string, routeKey: string, i
         // Short, and without links: it is shown to people as the agent's (trusted) request.
         const reason = plain(str(input.reason)).slice(0, 300);
         if (!reason) return bad(400, "say what you need a person to do (reason)");
+        // Asked already (often by another run of this agent on the same computer): people are not asked twice.
+        const open = await c.call<Control>(b.bot, "GET", "/control");
+        if (open.holder === "human") return ok({ alreadyWithPerson: true, next: "A person has this computer right now. Do not ask again: call /pc/wait." });
+        if (open.requested) return ok({ alreadyAsked: true, next: "A person has already been asked for help on this computer (perhaps by another of your runs). Do not ask again: call /pc/wait until done is true." });
         const state = await act("/control/request", { reason });
         await d.needsPerson(agentId, b, "help", reason, await pageUrl());
         return ok({ ...state, next: "A person has been asked. Now call /pc/wait (again until done is true): it returns when they hand the computer back, with the steps they took." });

@@ -63,7 +63,7 @@ test("while a person has the browser the agent is told to wait", async () => {
 
 test("asking for help or a password tells people, with the page it is on", async () => {
   const asked: unknown[][] = [];
-  const f = fake((p) => [200, p === "/read" ? { url: "https://app.gohighlevel.com/login" } : { holder: "bot", requested: true }]);
+  const f = fake((p) => [200, p === "/read" ? { url: "https://app.gohighlevel.com/login" } : p === "/control" ? { holder: "bot" } : { holder: "bot", requested: true }]);
   const d = deps(f.computer, {}, asked);
   assert.equal((await handle(d, "a", "ask-for-help", {})).status, 400, "a reason is required");
   assert.equal((await handle(d, "a", "ask-for-help", { reason: "2FA prompt" })).status, 200);
@@ -184,4 +184,21 @@ test("an agent's help request is shown to people short and without links", async
   assert.ok(reason.length <= 300);
   assert.doesNotMatch(reason, /evil\.example/);
   assert.match(reason, /^Urgent: log in here or visit \[link\] now/);
+});
+
+test("a second ask for help while one is open (say, from another run) does not ask people again", async () => {
+  const asked: unknown[][] = [];
+  let requested = false;
+  const f = fake((p) => {
+    if (p === "/control") return [200, { holder: "bot", requested }];
+    if (p === "/control/request") { requested = true; return [200, { holder: "bot", requested: true }]; }
+    return [200, { url: "https://auth.dealercenter.net/u/login" }];
+  });
+  const d = deps(f.computer, {}, asked);
+  assert.equal((await handle(d, "a", "ask-for-help", { reason: "DealerCenter login" })).status, 200);
+  const again = await handle(d, "a", "ask-for-help", { reason: "DealerCenter login page is open" });
+  assert.equal(again.status, 200);
+  assert.match(JSON.stringify(again.body), /already been asked/);
+  assert.equal(asked.length, 1, "people were asked once");
+  assert.equal(f.calls.filter((c) => c.path === "/control/request").length, 1);
 });
