@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import net from "node:net";
-import { checkProxy } from "../src/computer.ts";
+import { checkProxy, gatewayFor } from "../src/computer.ts";
 
 /** A proxy that wants u:p, and a plain "what is my address" server behind it. */
 async function rig() {
@@ -39,4 +39,11 @@ test("the proxy test refuses this machine and cloud metadata addresses", async (
   for (const u of ["http://127.0.0.1:3100", "http://localhost:5432", "http://169.254.169.254", "http://[::1]:80", "http://100.64.0.1:8080"]) {
     assert.match((await checkProxy(u) as { error: string }).error, /not allowed/, u);
   }
+});
+
+test("the gateway is found next to the computer, named after it", () => {
+  assert.equal(gatewayFor("http://agent-computer:4100"), "http://agent-computer-gateway:4201");
+  assert.equal(gatewayFor("http://agent-computer.railway.internal:4100"), "http://agent-computer-gateway.railway.internal:4201");
+  assert.equal(gatewayFor("http://10.0.0.5:4100"), "http://agent-computer-gateway:4201");
+  assert.equal(gatewayFor("nonsense"), "http://agent-computer-gateway:4201");
 });

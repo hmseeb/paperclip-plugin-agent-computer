@@ -1,6 +1,6 @@
 {
   "name": "paperclip-plugin-agent-computer",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "A computer for every Paperclip agent: a real browser that keeps its logins, watched live and taken over from Paperclip, shared computers, proxies, and agents that learn from what people show them.",
   "type": "module",
   "license": "MIT",

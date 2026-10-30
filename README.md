@@ -79,6 +79,11 @@ people's browsers ──(signed 60-second link)──▶ agent-computer-gateway 
 
 Several companies can share one computer; each needs the token secret in its own settings.
 
+**On Railway,** the "Paperclip with Agent Computer" template runs all of this and serves the live screen
+on Paperclip's own address. In the plugin settings use Computer URL
+`http://agent-computer.railway.internal:4100`, and for the token a Paperclip secret holding the
+`agent-computer` service's `COMPUTER_TOKEN` variable.
+
 ## Using it
 
 - **Computers** in the sidebar: every agent and shared computer, a "Needs you" tag on the ones
@@ -140,7 +145,7 @@ The gateway: `gateway/gateway.ts`, run with Bun.
 Bump `version` in `package.json` and `src/manifest.ts`, commit, then tag and push:
 
 ```bash
-git tag -a v0.7.0 -m v0.7.0 && git push origin main v0.7.0
+git tag -a v0.7.1 -m v0.7.1 && git push origin main v0.7.1
 ```
 
 The tag publishes the plugin to npm and builds both images for amd64 and arm64 on GHCR.

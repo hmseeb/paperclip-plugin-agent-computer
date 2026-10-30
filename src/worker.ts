@@ -1,7 +1,7 @@
 import { definePlugin, runWorker, type PluginContext } from "@paperclipai/plugin-sdk";
 import { createHmac } from "node:crypto";
 import { handle, type Target, type HowTo } from "./actions.ts";
-import { addressFor, checkProxy, Computer, egressFor, type ProxyCheck } from "./computer.ts";
+import { addressFor, checkProxy, Computer, egressFor, gatewayFor, type ProxyCheck } from "./computer.ts";
 import { HELP } from "./help.ts";
 import { detached } from "./detach.ts";
 import { abandoned, Leases, mayUse, proxyChoice, safeUrl, sharedComputers, summarize, type Demonstration, type SharedComputer, type Step } from "./learning.ts";
@@ -111,7 +111,7 @@ async function start(companyId: string, config: Record<string, unknown>): Promis
   const t: Tenant = {
     computer: new Computer(url, token, fetch, upstream), token, sites, shared,
     screenUrl: typeof config.screenUrl === "string" ? config.screenUrl.trim().replace(/\/+$/, "") : "",
-    gatewayUrl: (typeof config.gatewayUrl === "string" && config.gatewayUrl.trim()) || "http://agent-computer-gateway:4201", // its internal port
+    gatewayUrl: (typeof config.gatewayUrl === "string" && config.gatewayUrl.trim()) || gatewayFor(url), // its plugin-only port
     // Leases and takeovers survive a settings save.
     leases: old?.leases ?? new Leases(), takenAt: old?.takenAt ?? new Map(), chrome: old?.chrome ?? new Map(),
     pending: old?.pending ?? new Map(), lastUsed: old?.lastUsed ?? new Map(), steered: old?.steered ?? new Set(),

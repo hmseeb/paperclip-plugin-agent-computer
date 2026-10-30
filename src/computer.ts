@@ -58,6 +58,20 @@ export function egressFor(sites: string[] | undefined): Egress {
   return domains.length ? { mode: "allowlist_only", rules: domains.map((value) => ({ type: "domain", value })) } : { mode: "allow_all", rules: [] };
 }
 
+/**
+ * Where the gateway's plugin-only port is, by default: next to the computer, named after it
+ * (agent-computer -> agent-computer-gateway, on Railway agent-computer.railway.internal ->
+ * agent-computer-gateway.railway.internal), port 4201.
+ */
+export function gatewayFor(computerUrl: string): string {
+  try {
+    const u = new URL(computerUrl);
+    if (/^[\d.]+$|:/.test(u.hostname)) return "http://agent-computer-gateway:4201"; // an IP: nothing to name it after
+    const [first, ...rest] = u.hostname.split(".");
+    return `${u.protocol}//${[`${first}-gateway`, ...rest].join(".")}:4201`;
+  } catch { return "http://agent-computer-gateway:4201"; }
+}
+
 /** What the address bar opens: an address as typed, anything else searched on Google. */
 export function addressFor(input: string): string {
   const v = input.trim();
