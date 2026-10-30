@@ -25,4 +25,7 @@ jobs:
           test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
           grep -q "version: \"${GITHUB_REF_NAME#v}\"" src/manifest.ts
       - run: npm ci
-      - run: npm publish --access public --provenance
+      # The first release went out by hand (npm only trusts a workflow for a package that exists).
+      - name: Publish, unless this version is on npm already
+        run: |
+          if npm view "$(node -p 'require("./package.json").name')@${GITHUB_REF_NAME#v}" version >/dev/null 2>&1; then echo "already published"; else npm publish --access public --provenance; fi
