@@ -1,5 +1,7 @@
 import { definePlugin, runWorker, type PluginContext } from "@paperclipai/plugin-sdk";
-import { createHmac } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
+import { shareKey } from "../gateway/share-core.ts";
+import { describe as describeShare, MAX_ACTIVE, names as namesShare, newShare, parseShareInput, type Share } from "./shares.ts";
 import { handle, type Target, type HowTo } from "./actions.ts";
 import { addressFor, checkProxy, Computer, egressFor, gatewayFor, type ProxyCheck } from "./computer.ts";
 import { HELP } from "./help.ts";
@@ -14,6 +16,14 @@ const BUILT_FOR = typeof __BUILT_FOR_PAPERCLIP__ === "string" ? __BUILT_FOR_PAPE
 let versionNote: string | null = null;
 
 /** Paperclip's own address inside its container (its PORT), for reading its version. */
+/** Paperclip's public address (PAPERCLIP_PUBLIC_URL), for links sent to people outside. */
+async function publicUrl(): Promise<string> {
+  const { readFile } = await import("node:fs/promises");
+  const raw = await readFile(`/proc/${process.ppid}/environ`, "utf8").catch(() => "");
+  const v = raw.split("\0").find((p) => p.startsWith("PAPERCLIP_PUBLIC_URL="))?.slice(21) ?? process.env.PAPERCLIP_PUBLIC_URL ?? "";
+  return v.trim().replace(/\/+$/, "");
+}
+
 async function localBaseUrl(): Promise<string> {
   const { readFile } = await import("node:fs/promises");
   const raw = await readFile(`/proc/${process.ppid}/environ`, "utf8").catch(() => "");
@@ -44,6 +54,12 @@ interface Tenant {
   shared: SharedComputer[];
   leases: Leases;
   ticketKey: Buffer;
+  /** Signs shared links and replays; gateway/share-core.ts derives the same key from the same token. */
+  shareKey: Buffer;
+  /** Where shared links point: the live screen address, or Paperclip's public one. */
+  linkBase: string;
+  /** The last gateway share event seen (ms). */
+  shareEventsAt: number;
   /** When a person took each browser, and what they did with the browser chrome since. */
   takenAt: Map<string, number>;
   chrome: Map<string, Step[]>;
@@ -119,9 +135,13 @@ async function start(companyId: string, config: Record<string, unknown>): Promis
     proxies, proxyHealth, proxyFor, fallback, timers: detached(() => [
       ...(proxies.size ? [setInterval(() => void checkAll(), PROXY_CHECK_MS)] : []),
       setInterval(() => void handBackAbandoned(companyId).catch((err) => ctx.logger.warn("abandoned-computer check failed", { companyId, err: errText(err) })), 60_000),
+      setInterval(() => void sweepShares(companyId).catch((err) => ctx.logger.warn("shared links check failed", { companyId, err: errText(err) })), 60_000),
     ]),
     // Signs live-screen tickets; gateway/gateway.ts derives the same key from the same token.
     ticketKey: createHmac("sha256", token).update("agent-computer stream tickets").digest(),
+    shareKey: shareKey(token),
+    linkBase: (typeof config.screenUrl === "string" && config.screenUrl.trim().replace(/\/+$/, "")) || await publicUrl(),
+    shareEventsAt: old?.shareEventsAt ?? 0,
   };
   tenants.set(companyId, t);
   return t;
@@ -150,6 +170,165 @@ async function handBackAbandoned(companyId: string): Promise<void> {
     await t.computer.call(bot, "POST", "/control/release", { requestId: c.request?.id ?? "" }).catch(() => undefined);
     ctx.logger.info("handed a computer back to its agent: a person held it with nobody watching", { companyId, computer: bot, heldMinutes: Math.round(heldFor / 60_000) });
   }
+}
+
+/* -------------------------------------- shared links -------------------------------------- */
+
+const sharesQueue = new Map<string, Promise<unknown>>();
+/** One change to a company's shares at a time: read, change, save. */
+function withShares<T>(companyId: string, fn: (list: Share[]) => Promise<T>): Promise<T> {
+  const run = (sharesQueue.get(companyId) ?? Promise.resolve()).catch(() => undefined).then(async () => {
+    const list = (await store(companyId).get<Share[]>("shares")) ?? [];
+    const out = await fn(list);
+    const ended = list.filter((s) => s.status === "ended").slice(-100);
+    await store(companyId).set("shares", [...list.filter((s) => s.status !== "ended"), ...ended]);
+    return out;
+  });
+  sharesQueue.set(companyId, run);
+  return run;
+}
+const listShares = async (companyId: string) => (await store(companyId).get<Share[]>("shares")) ?? [];
+
+async function gateway<T>(t: Tenant, method: string, path: string, body?: unknown): Promise<T> {
+  const r = await fetch(`${t.gatewayUrl}${path}`, { method, headers: { authorization: `Bearer ${t.token}`, "content-type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(10_000) });
+  if (!r.ok) throw new Error(`the live-screen gateway answered ${r.status}`);
+  return r.json() as Promise<T>;
+}
+
+/** What the computer and gateway must know of a share; pushed again every minute (they forget on restart). */
+async function pushShare(t: Tenant, s: Share): Promise<void> {
+  await t.computer.egress(s.bot, { mode: "allow_all", rules: [] }); // its pages are limited by the page policy below
+  await t.computer.call(s.bot, "PUT", "/url-policy", { allow: s.allow });
+  await gateway(t, "PUT", `/_computer/shares/${s.id}`, { bot: s.bot, exp: s.exp, mode: s.mode, title: s.title, allow: s.allow, start: s.start, status: s.status, createdAt: s.createdAt });
+}
+
+async function createShare(companyId: string, t: Tenant, input: Record<string, unknown>, by: Share["createdBy"], lendBot: (ref: string) => Promise<{ bot: string; label: string } | string>) {
+  const parsed = parseShareInput(input);
+  if (!parsed.ok) return { status: 400, body: { error: parsed.error } };
+  if (!t.linkBase) return { status: 503, body: { error: "This Paperclip has no public address (PAPERCLIP_PUBLIC_URL) and the plugin has no live screen address, so a link cannot be made." } };
+  const lend = parsed.value.lend ? await lendBot(parsed.value.lend) : null;
+  if (typeof lend === "string") return { status: 403, body: { error: lend } };
+  return withShares(companyId, async (list) => {
+    if (list.filter((s) => s.status !== "ended").length >= MAX_ACTIVE) {
+      return { status: 409, body: { error: `${MAX_ACTIVE} shared browsers are open already. End one first (POST /pc/shares/<id>/end).` } };
+    }
+    const s = newShare(parsed.value, randomBytes(12), by);
+    await pushShare(t, s);
+    if (lend) {
+      const r = await t.computer.call<{ copied?: number }>(s.bot, "POST", "/cookies/import", { from: lend.bot, hosts: s.allow }, 60_000);
+      s.lendFrom = { bot: lend.bot, label: lend.label, copied: r.copied ?? 0 };
+    }
+    // The browser opens on its start page now, so the person finds it ready.
+    await t.computer.call(s.bot, "POST", "/navigate", { url: s.start }, 60_000).catch((err) => ctx.logger.info("shared link: start page did not open yet", { companyId, share: s.id, err: errText(err) }));
+    list.push(s);
+    ctx.logger.info("shared link created", { companyId, share: s.id, mode: s.mode, by: by.name, hours: parsed.value.hours });
+    return { status: 200, body: { ...describeShare(s, t.linkBase, t.shareKey), note: s.mode === "login"
+      ? `Send the link to the person. When they press "I'm done" the browser is yours: use it with computer=${s.bot} on /pc routes, then end the share.`
+      : `Send the link to the person. It ends when they press "I'm done" or the link expires.` } };
+  });
+}
+
+/** Closes a share: the link stops working and its browser, with whatever was signed in, is wiped. */
+async function endShare(companyId: string, t: Tenant, s: Share, reason: string): Promise<void> {
+  if (s.status === "ended") return;
+  s.status = "ended";
+  s.endedAt = Date.now();
+  s.endReason = reason;
+  await gateway(t, "POST", `/_computer/shares/${s.id}/end`).catch(() => undefined);
+  await t.computer.call(s.bot, "PUT", "/url-policy", { allow: [] }).catch(() => undefined);
+  await t.computer.call(s.bot, "PUT", "/egress-policy", { policy: { mode: "deny_all", rules: [] } }).catch(() => undefined);
+  await t.computer.call(s.bot, "POST", "/computers/reset", {}, 60_000).catch((err) => ctx.logger.warn("shared link: browser not wiped yet", { companyId, share: s.id, err: errText(err) }));
+  t.takenAt.delete(s.bot);
+  ctx.logger.info("shared link ended", { companyId, share: s.id, reason });
+}
+
+/** Every minute: what happened on the links, links past their expiry, and the settings pushed again. */
+async function sweepShares(companyId: string): Promise<void> {
+  const t = tenants.get(companyId);
+  if (!t) return;
+  const events = await gateway<{ events: { id: string; kind: string; at: number }[] }>(t, "GET", `/_computer/shares/events?since=${t.shareEventsAt}`).catch(() => null);
+  await withShares(companyId, async (list) => {
+    for (const e of events?.events ?? []) {
+      t.shareEventsAt = Math.max(t.shareEventsAt, e.at);
+      const s = list.find((x) => x.id === e.id);
+      if (!s || s.status === "ended") continue;
+      if (e.kind === "opened") s.openedAt ??= e.at;
+      if (e.kind === "done" && s.status === "active") { s.status = "done"; s.doneAt = e.at; }
+      if (e.kind === "ended") await endShare(companyId, t, s, "ended on the link");
+      if (s.status === "done" && s.mode === "lend") await endShare(companyId, t, s, "the person finished");
+    }
+    for (const s of list) {
+      if (s.status === "ended") continue;
+      if (s.exp * 1000 < Date.now()) { await endShare(companyId, t, s, "the link expired"); continue; }
+      await pushShare(t, s).catch(() => undefined);
+    }
+  });
+}
+
+/** A share as it stands now: the gateway knows first when the person opened the link or finished. */
+async function freshShare(companyId: string, t: Tenant, id: string): Promise<Share | null> {
+  const g = await gateway<{ status?: string; openedAt?: number; doneAt?: number }>(t, "GET", `/_computer/shares/${id}`).catch(() => null);
+  return withShares(companyId, async (list) => {
+    const s = list.find((x) => x.id === id) ?? null;
+    if (!s || !g || s.status === "ended") return s;
+    if (g.openedAt) s.openedAt ??= g.openedAt;
+    if (g.status === "done" && s.status === "active") { s.status = "done"; s.doneAt = g.doneAt ?? Date.now(); }
+    if (s.status === "done" && s.mode === "lend") await endShare(companyId, t, s, "the person finished");
+    if (g.status === "ended") await endShare(companyId, t, s, "ended on the link");
+    return s;
+  });
+}
+
+const recordingOf = (t: Tenant, s: Share) => gateway<{ frames: number }>(t, "GET", `/_computer/shares/${s.id}/recording`).catch(() => null);
+
+/** The /pc/shares routes, for agents. */
+async function shareRoutes(companyId: string, t: Tenant, agentId: string, routeKey: string, params: Record<string, string>, input: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
+  const find = async () => (await listShares(companyId)).find((x) => namesShare(x, String(params.share ?? "")));
+  switch (routeKey) {
+    case "shares": {
+      const list = (await listShares(companyId)).slice(-30).reverse();
+      return { status: 200, body: { shares: list.map((s) => describeShare(s, t.linkBase, t.shareKey)) } };
+    }
+    case "create-share": {
+      const agent = await ctx.agents.get(agentId, companyId).catch(() => null);
+      return createShare(companyId, t, input, { kind: "agent", id: agentId, name: agent?.name ?? "An agent" }, async (ref) => {
+        if (ref.toLowerCase() === "me" || ref === agentId) return { bot: agentId, label: `${agent?.name ?? "an agent"}'s computer` };
+        const b = findShared(t, ref);
+        if (!b) return `There is no shared computer "${ref}". Use "me" for your own computer.`;
+        if (!mayUse(b, agentId)) return `You may not lend from the shared computer "${b.name}".`;
+        return { bot: b.bot, label: b.name };
+      });
+    }
+    case "share": {
+      const s = await find();
+      if (!s) return { status: 404, body: { error: "No such share." } };
+      const fresh = (await freshShare(companyId, t, s.id)) ?? s;
+      return { status: 200, body: describeShare(fresh, t.linkBase, t.shareKey, await recordingOf(t, fresh)) };
+    }
+    case "end-share": {
+      const s = await find();
+      if (!s) return { status: 404, body: { error: "No such share." } };
+      await withShares(companyId, async (list) => { const x = list.find((y) => y.id === s.id); if (x) await endShare(companyId, t, x, "ended by an agent"); });
+      return { status: 200, body: { ended: s.id, recording: describeShare(s, t.linkBase, t.shareKey, await recordingOf(t, s)).recording } };
+    }
+    case "wait-share": {
+      // Until the person opens the link, finishes, or the share ends; at most 20 s (the host's limit is 30).
+      const s = await find();
+      if (!s) return { status: 404, body: { error: "No such share." } };
+      const before = `${s.status}.${Boolean(s.openedAt)}`;
+      const until = Date.now() + 20_000;
+      let now: Share = s;
+      while (Date.now() < until) {
+        now = (await freshShare(companyId, t, s.id)) ?? now;
+        if (`${now.status}.${Boolean(now.openedAt)}` !== before) break;
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      const changed = `${now.status}.${Boolean(now.openedAt)}` !== before;
+      return { status: 200, body: { ...describeShare(now, t.linkBase, t.shareKey), changed, note: changed ? undefined : "Nothing new yet; call again to keep waiting." } };
+    }
+  }
+  return { status: 404, body: { error: "Unknown route." } };
 }
 
 async function tenant(companyId: string): Promise<Tenant | null> {
@@ -246,6 +425,8 @@ const plugin = definePlugin({
       const id = typeof params.agentId === "string" ? params.agentId : "";
       const shared = t.shared.find((b) => b.bot === id);
       if (shared) return { t, bot: shared.bot, sites: shared.sites, companyId };
+      const link = id.startsWith("share-") ? (await listShares(companyId)).find((x) => x.bot === id && x.status !== "ended") : undefined;
+      if (link) return { t, bot: link.bot, sites: [] as string[], companyId };
       const agent = id ? await ctx.agents.get(id, companyId) : null;
       if (!agent) throw new Error("No such agent or shared computer in this company.");
       return { t, bot: agent.id, sites: t.sites.get(agent.id) ?? [], companyId };
@@ -288,6 +469,38 @@ const plugin = definePlugin({
         if (a && Date.now() - used < 3 * 60_000) active = { bot: a.id, agentName: a.name };
       }
       return { pending: waiting.sort((x, y) => y.at - x.at), active };
+    });
+    // Shared links on the Computers page.
+    ctx.actions.register("shares", async (params, context) => {
+      person(context);
+      const companyId = String(params.companyId ?? "");
+      const t = await tenant(companyId);
+      if (!t) return { shares: [], base: null };
+      const list = (await listShares(companyId)).slice(-30).reverse();
+      return { base: t.linkBase || null, max: MAX_ACTIVE, shares: await Promise.all(list.map(async (s) => describeShare(s, t.linkBase, t.shareKey, s.openedAt ? await recordingOf(t, s) : null))) };
+    });
+    ctx.actions.register("create-share", async (params, context) => {
+      person(context);
+      const companyId = String(params.companyId ?? "");
+      const t = await tenant(companyId);
+      if (!t) throw new Error("The agent computer is not set up for this company (plugin settings).");
+      const userId = (context.actor as { userId?: string; id?: string }).userId ?? (context.actor as { id?: string }).id ?? "";
+      const r = await createShare(companyId, t, params, { kind: "user", id: userId, name: "A team member" }, async (ref) => {
+        const b = t.shared.find((x) => x.bot === ref || x.id === ref);
+        if (b) return { bot: b.bot, label: b.name };
+        const a = await ctx.agents.get(ref, companyId).catch(() => null);
+        return a ? { bot: a.id, label: `${a.name}'s computer` } : "Pick whose sign-in to lend: an agent or a shared computer.";
+      });
+      if (r.status !== 200) throw new Error((r.body as { error: string }).error);
+      return r.body;
+    });
+    ctx.actions.register("end-share", async (params, context) => {
+      person(context);
+      const companyId = String(params.companyId ?? "");
+      const t = await tenant(companyId);
+      if (!t) throw new Error("Not set up.");
+      await withShares(companyId, async (list) => { const s = list.find((x) => x.id === params.id); if (s) await endShare(companyId, t, s, "ended by a team member"); });
+      return { ended: params.id };
     });
     // A person freeing a shared computer an agent is holding on to.
     ctx.actions.register("free-shared", async (params, context) => {
@@ -443,11 +656,18 @@ const plugin = definePlugin({
     const nameOf = async (id: string | null) => (id ? (await ctx.agents.get(id, companyId).catch(() => null))?.name ?? "another agent" : null);
     const query = Object.fromEntries(Object.entries(input.query).map(([k, v]) => [k, Array.isArray(v) ? v[0] : v]));
     const body = input.body && typeof input.body === "object" && !Array.isArray(input.body) ? (input.body as Record<string, unknown>) : {};
+    if (["shares", "create-share", "share", "end-share", "wait-share"].includes(input.routeKey)) {
+      const r = await shareRoutes(companyId, t, agentId, input.routeKey, input.params, { ...query, ...body });
+      return { status: r.status, body: r.body };
+    }
     const res = await handle({
       computer: t.computer,
       steered: (id) => t.steered.delete(id),
       async pick(id, name) {
         if (!name) { t.lastUsed.set(id, Date.now()); return { bot: id, label: "your computer", sites: t.sites.get(id) ?? [], shared: false }; }
+        // A shared link's browser: any agent of the company may use it once the person is done with it.
+        const share = (await listShares(companyId)).find((x) => x.status !== "ended" && namesShare(x, name));
+        if (share) return { bot: share.bot, label: `the shared browser "${share.title}"`, sites: [], shared: true };
         const b = findShared(t, name);
         if (!b) return { status: 404, error: `There is no shared computer "${name}". /pc/computers lists yours.` };
         if (!mayUse(b, id)) return { status: 403, error: `You may not use the shared computer "${b.name}"; the board decides in the plugin settings.` };

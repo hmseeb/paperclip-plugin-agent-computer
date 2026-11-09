@@ -329,7 +329,7 @@ export function ComputersPage({ context }: PluginPageProps) {
       {sub ? <span style={{ ...s.help, fontSize: 11.5 }}>{sub}</span> : null}
     </button>
   );
-  const isShared = Boolean(list?.shared.some((b) => b.id === agentId));
+  const isShared = Boolean(list?.shared.some((b) => b.id === agentId)) || Boolean(agentId?.startsWith("share-"));
   return (
     <div style={{ display: "grid", gridTemplateColumns: "minmax(0,220px) minmax(0,1fr)", gap: 20, padding: 16 }}>
       <div style={{ display: "grid", gap: 4, alignContent: "start" }}>
@@ -346,11 +346,136 @@ export function ComputersPage({ context }: PluginPageProps) {
         </> : null}
         <div style={{ ...s.label, marginBottom: 6 }}>Agents</div>
         {(list?.agents ?? []).map((a) => item(a.id, a.name))}
+        <div style={{ height: 12 }} />
+        <div style={{ ...s.label, marginBottom: 6 }}>Shared links</div>
+        {item(LINKS, "Manage links", "share a browser with anyone")}
+        <OpenLinks companyId={companyId} item={item} />
       </div>
-      {agentId ? <div style={{ display: "grid", gap: 18, alignContent: "start", minWidth: 0 }}>
+      {agentId === LINKS ? <SharedLinks companyId={companyId} agents={list?.agents ?? []} sharedComputers={list?.shared ?? []} onWatch={pick} /> : agentId ? <div style={{ display: "grid", gap: 18, alignContent: "start", minWidth: 0 }}>
         <LiveView key={agentId} companyId={companyId} agentId={agentId} autoTake={takeover && agentId === new URLSearchParams(window.location.search).get("agent")} />
         {isShared ? null : <HowTos key={`h-${agentId}`} companyId={companyId} agentId={agentId} />}
       </div> : <div style={s.help}>No agents.</div>}
+    </div>
+  );
+}
+
+const LINKS = "__links";
+interface ShareRow {
+  id: string; computer: string; title: string; mode: "login" | "lend"; status: "active" | "done" | "ended"; allow: string[]; start: string;
+  expiresAt: string; createdAt: string; createdBy: string; openedAt: string | null; doneAt: string | null; endedAt: string | null; endReason: string | null;
+  lendFrom: { from: string; cookiesCopied: number } | null; link: string | null; recording?: { frames: number; replay: string } | null;
+}
+const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "");
+const stateOf = (r: ShareRow) => r.status === "ended" ? `ended (${r.endReason ?? "closed"})` : r.status === "done" ? (r.mode === "login" ? "signed in; the agent has it" : "finished") : r.openedAt ? "in use" : "not opened yet";
+
+/** Open shared links in the sidebar: each one's browser can be watched (or taken over) like an agent's. */
+function OpenLinks({ companyId, item }: { companyId: string; item: (id: string, label: string, sub?: string | null) => ReactNode }) {
+  const shares = usePluginAction("shares");
+  const [rows, setRows] = useState<ShareRow[]>([]);
+  useEffect(() => {
+    let live = true;
+    const load = () => shares({ companyId }).then((r) => { if (live) setRows(((r as { shares: ShareRow[] }).shares ?? []).filter((x) => x.status !== "ended")); }).catch(() => undefined);
+    void load();
+    const timer = setInterval(load, 10_000);
+    return () => { live = false; clearInterval(timer); };
+  }, [companyId]);
+  return <>{rows.map((r) => item(r.computer, r.title, stateOf(r)))}</>;
+}
+
+/** Make a link that lends a browser to someone outside, and see, copy, end and replay them. */
+function SharedLinks({ companyId, agents, sharedComputers, onWatch }: { companyId: string; agents: { id: string; name: string }[]; sharedComputers: { id: string; name: string }[]; onWatch: (bot: string) => void }) {
+  const shares = usePluginAction("shares");
+  const create = usePluginAction("create-share");
+  const end = usePluginAction("end-share");
+  const [rows, setRows] = useState<ShareRow[] | null>(null);
+  const [max, setMax] = useState(3);
+  const [base, setBase] = useState<string | null>(null);
+  const [form, setForm] = useState({ mode: "login" as "login" | "lend", title: "", allow: "", start: "", hours: "48", lend: "" });
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ ok: boolean; text: string; link?: string } | null>(null);
+  const load = useCallback(() => shares({ companyId }).then((r) => {
+    const x = r as { shares: ShareRow[]; max?: number; base?: string | null };
+    setRows(x.shares ?? []); if (x.max) setMax(x.max); setBase(x.base ?? null);
+  }).catch((e) => setNote({ ok: false, text: errText(e) })), [companyId]);
+  useEffect(() => { void load(); const t = setInterval(load, 10_000); return () => clearInterval(t); }, [load]);
+  const copy = (text: string) => { void navigator.clipboard?.writeText(text); setNote({ ok: true, text: "Link copied." }); };
+  const open = (rows ?? []).filter((r) => r.status !== "ended");
+  const submit = async () => {
+    setBusy(true); setNote(null);
+    try {
+      const r = (await create({ companyId, mode: form.mode, title: form.title, allow: form.allow, start: form.start, hours: Number(form.hours), lend: form.mode === "lend" ? form.lend : "" })) as ShareRow;
+      setNote({ ok: true, text: "Link ready. Send it to the person; it works without a Paperclip login until it expires.", link: r.link ?? undefined });
+      setForm({ ...form, title: "", allow: "", start: "" });
+      void load();
+    } catch (e) { setNote({ ok: false, text: errText(e) }); } finally { setBusy(false); }
+  };
+  return (
+    <div style={{ display: "grid", gap: 22, alignContent: "start", minWidth: 0 }}>
+      <div style={{ display: "grid", gap: 4 }}>
+        <div style={{ fontSize: 18, fontWeight: 600 }}>Share a browser</div>
+        <div style={s.help}>A link anyone can open, no login: a fresh browser that can only open the addresses you list, recorded, and wiped when it ends. At most {max} open at once.</div>
+        {base ? null : <div style={s.warn}>This Paperclip has no public address (PAPERCLIP_PUBLIC_URL) and no live screen address is set, so links cannot be made.</div>}
+      </div>
+      <div style={{ display: "grid", gap: 14, padding: 16, borderRadius: 8, border: "1px solid rgba(127,127,127,.25)" }}>
+        <div style={s.row}>
+          <label style={{ ...s.row, cursor: "pointer" }}><input type="radio" checked={form.mode === "login"} onChange={() => setForm({ ...form, mode: "login" })} /> They sign in to their account</label>
+          <label style={{ ...s.row, cursor: "pointer" }}><input type="radio" checked={form.mode === "lend"} onChange={() => setForm({ ...form, mode: "lend" })} /> They use one of our accounts</label>
+        </div>
+        <div style={s.help}>{form.mode === "login"
+          ? "For example a client's GoDaddy or Namecheap: they sign in (with their own 2FA) and press \"I'm done\"; the agent then works in that same browser, on the task, and the share is ended after."
+          : "Their browser starts signed in to our account on the sites below, copied from the computer you pick; they never see a password. It ends when they press \"I'm done\"."}</div>
+        <Field label="What it's for" help="Shown at the top of their screen.">
+          <input style={s.input} value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} placeholder="Connect badaaas.com to Vercel" />
+        </Field>
+        <Field label="Addresses they can open" help={<>One per line. A host opens the whole site; a path limits it (<code>dcc.godaddy.com/control/*/dns</code>); <code>*</code> is a wildcard. Include the sign-in pages the site uses (<code>sso.godaddy.com</code>). Each line shows on their screen.</>}>
+          <textarea style={{ ...s.input, minHeight: 90, fontFamily: "ui-monospace, monospace" }} value={form.allow} onChange={(e) => setForm({ ...form, allow: e.target.value })} placeholder={"sso.godaddy.com\ndcc.godaddy.com/control/*/dns"} />
+        </Field>
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0,2fr) minmax(0,1fr)", gap: 12 }}>
+          <Field label="Start page" help="Optional: the first address without a wildcard.">
+            <input style={s.input} value={form.start} onChange={(e) => setForm({ ...form, start: e.target.value })} placeholder="sso.godaddy.com" />
+          </Field>
+          <Field label="Link works for">
+            <select style={s.input} value={form.hours} onChange={(e) => setForm({ ...form, hours: e.target.value })}>
+              <option value="2">2 hours</option><option value="8">8 hours</option><option value="24">1 day</option><option value="48">2 days</option><option value="168">7 days</option>
+            </select>
+          </Field>
+        </div>
+        {form.mode === "lend" ? <Field label="Signed in as" help="Only the sign-in for the addresses above is copied from this computer.">
+          <select style={s.input} value={form.lend} onChange={(e) => setForm({ ...form, lend: e.target.value })}>
+            <option value="">Pick a computer</option>
+            {sharedComputers.map((b) => <option key={b.id} value={b.id}>{b.name} (shared computer)</option>)}
+            {agents.map((a) => <option key={a.id} value={a.id}>{a.name}'s computer</option>)}
+          </select>
+        </Field> : null}
+        <div style={s.row}>
+          <button style={{ ...s.button, ...s.primary }} disabled={busy || !form.allow.trim() || !base || (form.mode === "lend" && !form.lend) || open.length >= max} onClick={() => void submit()}>{busy ? "Making the link…" : "Make the link"}</button>
+          {open.length >= max ? <span style={s.help}>{max} links are open: end one first.</span> : null}
+        </div>
+        {note ? <div style={{ ...(note.ok ? s.ok : s.bad), display: "grid", gap: 6 }}>{note.text}
+          {note.link ? <div style={s.row}><code style={{ wordBreak: "break-all", color: "inherit" }}>{note.link}</code><button style={s.button} onClick={() => copy(note.link!)}>Copy link</button></div> : null}</div> : null}
+      </div>
+      <div style={{ display: "grid", gap: 10 }}>
+        <div style={s.label}>Links</div>
+        {rows === null ? <div style={s.help}>Loading…</div> : rows.length ? rows.map((r) => (
+          <div key={r.id} style={{ display: "grid", gap: 6, padding: 12, borderRadius: 8, border: "1px solid rgba(127,127,127,.25)", opacity: r.status === "ended" ? 0.7 : 1 }}>
+            <div style={{ ...s.row, justifyContent: "space-between" }}>
+              <b>{r.title}</b>
+              <span style={{ fontSize: 12, padding: "2px 8px", borderRadius: 999, border: "1px solid rgba(127,127,127,.35)" }}>{stateOf(r)}</span>
+            </div>
+            <div style={s.help}>
+              {r.mode === "login" ? "They sign in" : `Our account (${r.lendFrom?.from ?? "?"}, ${r.lendFrom?.cookiesCopied ?? 0} sign-in cookies)`} · by {r.createdBy} {when(r.createdAt)}
+              {r.status !== "ended" ? ` · expires ${when(r.expiresAt)}` : ` · ended ${when(r.endedAt)}`}
+            </div>
+            <div style={{ ...s.help, fontFamily: "ui-monospace, monospace" }}>{r.allow.join("  ·  ")}</div>
+            <div style={s.row}>
+              {r.link ? <button style={s.button} onClick={() => copy(r.link!)}>Copy link</button> : null}
+              {r.status !== "ended" ? <button style={s.button} onClick={() => onWatch(r.computer)}>Watch</button> : null}
+              {r.recording?.frames ? <a style={{ ...s.button, textDecoration: "none" }} href={r.recording.replay} target="_blank" rel="noreferrer">Replay ({r.recording.frames} frames)</a> : null}
+              {r.status !== "ended" ? <button style={{ ...s.button, ...s.bad }} onClick={() => { if (confirm("End this link? Its browser and anything signed in there are wiped.")) void end({ companyId, id: r.id }).then(load); }}>End</button> : null}
+            </div>
+          </div>
+        )) : <div style={s.help}>No links yet.</div>}
+      </div>
     </div>
   );
 }

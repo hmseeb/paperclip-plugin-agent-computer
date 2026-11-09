@@ -61,6 +61,33 @@ computer at a time: if another agent has it you get a 409 saying who; try later.
 POST /release {"computer": "GoHighLevel"} so others can use it (it also frees itself 10 minutes after
 your last call).
 
+## Shared links: a browser for someone outside
+
+When a task needs someone outside the company in a browser, make a **shared link** instead of
+asking for their password or sending ours. It is a fresh browser, separate from yours, that opens
+only the addresses you list (each shown on their screen), works without a Paperclip login until it
+expires (48 hours by default), is recorded, and is wiped when it ends.
+
+- **They sign in to their own account** (\`"mode":"login"\`, the default): a client's GoDaddy or
+  Namecheap to set up DNS. They sign in (their 2FA too) and press "I'm done"; the browser is then
+  yours: add \`"computer":"share-<id>"\` to /open, /look, /click and the rest to do the work there.
+  End the share when finished (POST /shares/<id>/end): that wipes their sign-in.
+- **They use one of our accounts** (\`"mode":"lend"\`, with \`"lend":"me"\` or a shared computer's
+  name): only the sign-in for the listed sites is copied in from that computer, and they never see
+  a password. It ends when they press "I'm done".
+
+List the sign-in pages too (sso.godaddy.com, not only dcc.godaddy.com): a page not on the list shows
+them what is. Paths limit a site: \`dcc.godaddy.com/control/*/dns\`; \`*\` is a wildcard. Give the
+link to the person you are working with to send on; say what it is for and that it expires. Then
+GET /shares/<id>/wait (repeat) to know when they opened it and when they are done. At most 3
+links are open at once.
+
+POST /shares            {"allow":["sso.godaddy.com","dcc.godaddy.com/control/*/dns"],"title":"Connect badaaas.com to Vercel","start":"sso.godaddy.com","hours":48,"mode":"login","task":"BAD-123"}
+GET  /shares                     recent links, with status
+GET  /shares/<id>                status, and its recording's replay link (for people)
+GET  /shares/<id>/wait           returns when it changes (opened, done, ended); call again
+POST /shares/<id>/end            closes the link and wipes its browser
+
 ## Calls
 
 GET  /status                     who has the computer (\`holder\`: bot or human), pending requests
@@ -91,7 +118,8 @@ name: agent-computer
 description: >
   Use when a task needs the web: open and read websites on your own computer, click and type, stay
   logged in between runs, hand the computer to a person for logins, captchas, 2FA, passwords or steps
-  you do not know, learn how-tos from what people show you, and use shared computers.
+  you do not know, learn how-tos from what people show you, use shared computers, and lend a browser
+  to someone outside through a link (a client signing in to GoDaddy for DNS, or using one of ours).
 ---
 
 ${HELP}`;

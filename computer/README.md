@@ -15,6 +15,11 @@ chrome a person driving it needs:
   you…" with nothing to click. Sites fall back to password and codes, which happen in the page.
 - Upstream proxies set at runtime per browser (`PUT /egress-policy {policy, upstream}`), winning over
   `EGRESS_PROXY_*`; `null` is direct. The plugin sends each computer's proxy with every policy push.
+- Shared browsers (`src/share.ts`), for the plugin's shared links: `PUT /url-policy {allow}` limits
+  the pages a browser may open (top-level navigations in every tab and popup; others get a page
+  listing what is allowed), `POST /viewport {width,height}` sizes it to its viewer's window (the
+  screencast follows, so clicks map 1:1), and `POST /cookies/import {from, hosts}` copies one
+  site's cookies from another browser.
 - `SCREENCAST_QUALITY` sets the live screen's JPEG quality (default 70; 40 suits a home upload).
 
 The pinned commit is in `OPENBOT_REF`. CI builds the image as `ghcr.io/hmseeb/agent-computer` for amd64

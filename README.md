@@ -22,6 +22,12 @@ they hold the computer.
   next time. Corrections update it, and an agent can teach another agent.
 - **Shared computers.** Named computers several agents use, one at a time, such as one logged into
   GoHighLevel for everyone. For all agents by default, or only the ones you pick.
+- **Shared links.** Lend a browser to someone outside the company through a link: no login, it
+  opens only the addresses you list (shown at the top of their screen), full screen on their device,
+  recorded, and wiped when it ends. Either they sign in to their own account (a client's GoDaddy or
+  Namecheap, so an agent can set up DNS there after they press "I'm done"), or they use one of yours
+  without ever seeing its password (one site's sign-in is copied in from an agent's or a shared
+  computer). Made from the Computers page (**Shared links**) or by an agent (`POST /pc/shares`).
 - **Proxies.** Send the computers' traffic through proxies (residential ones, for example), tested
   before saving, per agent or shared computer. Choose what happens when one stops working: keep
   working over the computer's own connection, or stop.
@@ -105,6 +111,12 @@ on Paperclip's own address. In the plugin settings use Computer URL
 - **No private network.** Agents' browsers can't reach loopback or private addresses (the admin pages
   and databases next to the computer) or cloud metadata addresses. Set `EGRESS_BLOCK_PRIVATE=off` on the
   computer only if agents really need an internal site.
+- **Shared links** are signed for one share and expire (48 hours by default, 7 days at most); a
+  team member or agent can end one at any time. Each share is its own browser, never an agent's, so
+  nothing else signed in there is reachable. Only top-level pages are checked against its list (the
+  scripts and APIs those pages load are not), and a lent sign-in is only the cookies of the sites
+  listed. When it ends its browser and everything signed in there are deleted; the recording (one
+  frame a second at most, only when the screen changes) is kept 30 days on the gateway's volume.
 - **Password prompts** only go to password or one-time-code fields, and name the site asking.
 - **How-tos one agent teaches another** never replace what that agent already knows.
 - **Passwords** typed for an agent go into the page field and are not stored, logged, returned or

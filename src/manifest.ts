@@ -6,7 +6,7 @@ const route = (routeKey: string, method: "GET" | "POST", path: string) => ({ rou
 const manifest: PaperclipPluginManifestV1 = {
   id: "agent-computer",
   apiVersion: 1,
-  version: "0.7.2",
+  version: "0.8.0",
   displayName: "Agent computer",
   description: "A computer per agent that keeps its logins, plus shared computers. Watch them live on the Computers page, take over for logins and 2FA, type passwords the agent never sees, and teach agents by doing.",
   author: "Haseeb Azhar",
@@ -37,6 +37,11 @@ const manifest: PaperclipPluginManifestV1 = {
     route("save-howto", "POST", "/pc/howtos"),
     route("forget-howto", "POST", "/pc/howtos/forget"),
     route("teach", "POST", "/pc/howtos/teach"),
+    route("shares", "GET", "/pc/shares"),
+    route("create-share", "POST", "/pc/shares"),
+    route("share", "GET", "/pc/shares/:share"),
+    route("end-share", "POST", "/pc/shares/:share/end"),
+    route("wait-share", "GET", "/pc/shares/:share/wait"),
   ],
   skills: [{ skillKey: "computer", displayName: "Agent computer", slug: "agent-computer", description: "Use your own computer on the web, keep your logins, hand it to a person when needed, and learn from what they do.", markdown: SKILL }],
   ui: {
