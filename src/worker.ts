@@ -299,6 +299,10 @@ async function endShare(companyId: string, t: Tenant, s: Share, reason: string):
   s.status = "ended";
   s.endedAt = Date.now();
   s.endReason = reason;
+  // The gateway knows first whether they opened it (the minute's sweep may not have caught up yet).
+  const g = await gateway<{ openedAt?: number; doneAt?: number }>(t, "GET", `/_computer/shares/${s.id}`).catch(() => null);
+  if (g?.openedAt) s.openedAt ??= g.openedAt;
+  if (g?.doneAt) s.doneAt ??= g.doneAt;
   await gateway(t, "POST", `/_computer/shares/${s.id}/end`).catch(() => undefined);
   // Their sign-in, kept where the link said, before the browser is wiped (only if they opened it).
   if (s.keep && s.openedAt && !s.kept) {
@@ -574,7 +578,7 @@ const plugin = definePlugin({
       const t = await tenant(companyId);
       if (!t) return { shares: [], base: null };
       const list = (await listShares(companyId)).slice(-30).reverse();
-      return { base: t.linkBase || null, max: MAX_ACTIVE, shares: await Promise.all(list.map(async (s) => describeShare(s, t.linkBase, t.shareKey, s.openedAt ? await recordingOf(t, s) : null))) };
+      return { base: t.linkBase || null, max: MAX_ACTIVE, shares: await Promise.all(list.map(async (s) => describeShare(s, t.linkBase, t.shareKey, await recordingOf(t, s)))) };
     });
     ctx.actions.register("create-share", async (params, context) => {
       person(context);
