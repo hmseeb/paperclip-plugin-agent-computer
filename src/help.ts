@@ -76,6 +76,18 @@ expires (48 hours by default), is recorded, and is wiped when it ends.
   name): only the sign-in for the listed sites is copied in from that computer, and they never see
   a password. It ends when they press "I'm done".
 
+**Keeping their sign-in.** To use it again later without another link, add
+\`"keep":"new:Acme GoDaddy"\` (or an existing shared computer's name) when making a "login" link:
+their screen tells them it is kept and how to revoke it, and when the link ends their sign-in for the
+listed sites is copied into that shared computer. Later, any agent uses \`"computer":"Acme GoDaddy"\`.
+Or keep it while the link is open: POST /shares/<id>/keep {"computer":"new:Acme GoDaddy"}. Keep a
+client's sign-in only when the task needs it again; sign-ins expire (days to weeks), and then you
+ask for a new link.
+
+**Copying a sign-in between computers.** POST /copy-login {"from","to","sites"} copies the sign-in
+for those sites: from "me" (your computer), a shared computer, or an open link's browser; to "me",
+a shared computer, or "new:<name>" (a new shared computer the team can use). Every copy is logged.
+
 List the sign-in pages too (sso.godaddy.com, not only dcc.godaddy.com): a page not on the list shows
 them what is. Paths limit a site: \`dcc.godaddy.com/control/*/dns\`; \`*\` is a wildcard. Give the
 link to the person you are working with to send on; say what it is for and that it expires. Then
@@ -87,6 +99,8 @@ GET  /shares                     recent links, with status
 GET  /shares/<id>                status, and its recording's replay link (for people)
 GET  /shares/<id>/wait           returns when it changes (opened, done, ended); call again
 POST /shares/<id>/end            closes the link and wipes its browser
+POST /shares/<id>/keep  {"computer":"new:Acme GoDaddy"}   keep their sign-in now
+POST /copy-login        {"from":"me","to":"new:Team GoDaddy","sites":["godaddy.com"]}
 
 ## Calls
 

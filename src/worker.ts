@@ -1,7 +1,7 @@
 import { definePlugin, runWorker, type PluginContext } from "@paperclipai/plugin-sdk";
 import { createHmac, randomBytes } from "node:crypto";
 import { shareKey } from "../gateway/share-core.ts";
-import { describe as describeShare, MAX_ACTIVE, names as namesShare, newShare, parseShareInput, type Share } from "./shares.ts";
+import { describe as describeShare, hostsFrom, keepNotice, keptId, MAX_ACTIVE, names as namesShare, newShare, parseShareInput, type KeptComputer, type Share } from "./shares.ts";
 import { handle, type Target, type HowTo } from "./actions.ts";
 import { addressFor, checkProxy, Computer, egressFor, gatewayFor, type ProxyCheck } from "./computer.ts";
 import { HELP } from "./help.ts";
@@ -102,7 +102,8 @@ async function start(companyId: string, config: Record<string, unknown>): Promis
   }
   const agentProxy = (config.agentProxies && typeof config.agentProxies === "object" ? config.agentProxies : {}) as Record<string, string>;
   const defaultProxy = typeof config.defaultProxy === "string" ? config.defaultProxy : undefined;
-  const shared = sharedComputers(config, companyId);
+  // The settings' shared computers, then the ones made to keep a sign-in (plugin state).
+  const shared = [...sharedComputers(config, companyId), ...((await store(companyId).get<KeptComputer[]>("kept")) ?? []).map((k) => keptShared(k, companyId))];
   const proxyFor = (bot: string) => proxyChoice(shared.find((b) => b.bot === bot)?.proxy ?? agentProxy[bot], defaultProxy);
   const proxyHealth = new Map<string, ProxyCheck & { at: number }>();
   // A proxy that is down: by default the computer's own connection instead, so work goes on; with
@@ -172,6 +173,64 @@ async function handBackAbandoned(companyId: string): Promise<void> {
   }
 }
 
+/* ------------------------------------ kept sign-ins ------------------------------------ */
+
+/** A kept computer as a shared one: any agent may use it, at any site (its sign-in decides what it can do). */
+const keptShared = (k: KeptComputer, companyId: string): SharedComputer =>
+  ({ id: k.id, bot: `${k.id}-${companyId.replace(/[^a-z0-9]/gi, "").slice(0, 8)}`, name: k.name, allAgents: true, agents: [], sites: [] });
+
+async function addKept(companyId: string, t: Tenant, name: string, by: string, sites: string[]): Promise<SharedComputer> {
+  const list = (await store(companyId).get<KeptComputer[]>("kept")) ?? [];
+  const clean = name.trim().slice(0, 60) || "Kept sign-in";
+  const existing = t.shared.find((b) => b.name.toLowerCase() === clean.toLowerCase());
+  if (existing) return existing;
+  const k: KeptComputer = { id: keptId(clean, [...list.map((x) => x.id), ...t.shared.map((b) => b.id)]), name: clean, createdAt: Date.now(), createdBy: by, sites };
+  await store(companyId).set("kept", [...list, k]);
+  const b = keptShared(k, companyId);
+  t.shared.push(b);
+  return b;
+}
+
+type Who = { kind: "agent"; agentId: string; name: string } | { kind: "user"; name: string };
+type Spot = { bot: string; label: string };
+
+/** Where a sign-in may be copied to: an agent's own computer, a shared one it may use, or a new kept one. */
+async function destination(companyId: string, t: Tenant, ref: string, who: Who, sites: string[]): Promise<Spot | string> {
+  const r = ref.trim();
+  if (who.kind === "agent" && (r.toLowerCase() === "me" || r === who.agentId)) return { bot: who.agentId, label: `${who.name}'s computer` };
+  if (/^new:/i.test(r)) {
+    const b = await addKept(companyId, t, r.slice(4), who.name, sites);
+    return { bot: b.bot, label: b.name };
+  }
+  const b = t.shared.find((x) => x.id === r || x.bot === r || x.name.toLowerCase() === r.toLowerCase());
+  if (b) return who.kind === "agent" && !mayUse(b, who.agentId) ? `You may not use the shared computer "${b.name}".` : { bot: b.bot, label: b.name };
+  if (who.kind === "user") {
+    const a = await ctx.agents.get(r, companyId).catch(() => null);
+    if (a) return { bot: a.id, label: `${a.name}'s computer` };
+  }
+  return `No computer "${r}". Use "me", a shared computer's name, or "new:<name>" for a new shared computer.`;
+}
+
+/** Where a sign-in may be copied from: the same, plus an open shared link's browser. */
+async function source(companyId: string, t: Tenant, ref: string, who: Who): Promise<Spot | string> {
+  const link = (await listShares(companyId)).find((x) => x.status !== "ended" && namesShare(x, ref.trim()));
+  if (link) return { bot: link.bot, label: `the shared link "${link.title}"` };
+  if (/^new:/i.test(ref.trim())) return "A new computer has no sign-ins to copy.";
+  return destination(companyId, t, ref, who, []);
+}
+
+/** Copies the sign-in for these sites from one computer to another, and logs who did it. */
+async function copyLogin(companyId: string, t: Tenant, from: Spot, to: Spot, sites: string[], who: Who): Promise<number> {
+  const hosts = hostsFrom(sites);
+  if (!hosts.length) throw new Error("No sites to copy: name them as hosts, e.g. dcc.godaddy.com.");
+  const r = await t.computer.call<{ copied?: number }>(to.bot, "POST", "/cookies/import", { from: from.bot, hosts }, 60_000);
+  const copied = r.copied ?? 0;
+  const log = (await store(companyId).get<unknown[]>("login-copies")) ?? [];
+  await store(companyId).set("login-copies", [...log, { at: Date.now(), by: who.name, from: from.label, to: to.label, sites: hosts, cookies: copied }].slice(-300));
+  ctx.logger.info("sign-in copied", { companyId, by: who.name, from: from.label, to: to.label, sites: hosts, cookies: copied });
+  return copied;
+}
+
 /* -------------------------------------- shared links -------------------------------------- */
 
 const sharesQueue = new Map<string, Promise<unknown>>();
@@ -200,12 +259,16 @@ async function gateway<T>(t: Tenant, method: string, path: string, body?: unknow
 async function pushShare(t: Tenant, s: Share): Promise<void> {
   await t.computer.egress(s.bot, { mode: "allow_all", rules: [] }); // its pages are limited by the page policy below
   await t.computer.call(s.bot, "PUT", "/url-policy", { allow: s.allow });
-  await gateway(t, "PUT", `/_computer/shares/${s.id}`, { bot: s.bot, exp: s.exp, mode: s.mode, title: s.title, allow: s.allow, start: s.start, status: s.status, createdAt: s.createdAt });
+  await gateway(t, "PUT", `/_computer/shares/${s.id}`, { bot: s.bot, exp: s.exp, mode: s.mode, title: s.title, allow: s.allow, start: s.start, status: s.status, createdAt: s.createdAt, notice: s.notice ?? null });
 }
 
-async function createShare(companyId: string, t: Tenant, input: Record<string, unknown>, by: Share["createdBy"], lendBot: (ref: string) => Promise<{ bot: string; label: string } | string>) {
+async function createShare(companyId: string, t: Tenant, input: Record<string, unknown>, by: Share["createdBy"], lendBot: (ref: string) => Promise<{ bot: string; label: string } | string>, who: Who) {
   const parsed = parseShareInput(input);
   if (!parsed.ok) return { status: 400, body: { error: parsed.error } };
+  // Where their sign-in is kept afterwards: made (if new) now, so the link can say who keeps it.
+  const keep = parsed.value.keep ? await destination(companyId, t, parsed.value.keep, who, parsed.value.allow) : null;
+  if (typeof keep === "string") return { status: 400, body: { error: keep } };
+  const company = keep ? (await ctx.companies.get(companyId).catch(() => null))?.name ?? "We" : null;
   if (!t.linkBase) return { status: 503, body: { error: "This Paperclip has no public address (PAPERCLIP_PUBLIC_URL) and the plugin has no live screen address, so a link cannot be made." } };
   const lend = parsed.value.lend ? await lendBot(parsed.value.lend) : null;
   if (typeof lend === "string") return { status: 403, body: { error: lend } };
@@ -214,6 +277,7 @@ async function createShare(companyId: string, t: Tenant, input: Record<string, u
       return { status: 409, body: { error: `${MAX_ACTIVE} shared browsers are open already. End one first (POST /pc/shares/<id>/end).` } };
     }
     const s = newShare(parsed.value, randomBytes(12), by);
+    if (keep) { s.keep = keep; s.notice = keepNotice(company ?? "We"); }
     await pushShare(t, s);
     if (lend) {
       const r = await t.computer.call<{ copied?: number }>(s.bot, "POST", "/cookies/import", { from: lend.bot, hosts: s.allow }, 60_000);
@@ -236,6 +300,12 @@ async function endShare(companyId: string, t: Tenant, s: Share, reason: string):
   s.endedAt = Date.now();
   s.endReason = reason;
   await gateway(t, "POST", `/_computer/shares/${s.id}/end`).catch(() => undefined);
+  // Their sign-in, kept where the link said, before the browser is wiped (only if they opened it).
+  if (s.keep && s.openedAt && !s.kept) {
+    const cookies = await copyLogin(companyId, t, { bot: s.bot, label: `the shared link "${s.title}"` }, s.keep, s.allow, { kind: "user", name: `${s.createdBy.name} (link "${s.title}")` })
+      .catch((err) => { ctx.logger.warn("shared link: sign-in not kept", { companyId, share: s.id, err: errText(err) }); return -1; });
+    if (cookies >= 0) s.kept = { into: s.keep.label, cookies, at: Date.now() };
+  }
   await t.computer.call(s.bot, "PUT", "/url-policy", { allow: [] }).catch(() => undefined);
   await t.computer.call(s.bot, "PUT", "/egress-policy", { policy: { mode: "deny_all", rules: [] } }).catch(() => undefined);
   await t.computer.call(s.bot, "POST", "/computers/reset", {}, 60_000).catch((err) => ctx.logger.warn("shared link: browser not wiped yet", { companyId, share: s.id, err: errText(err) }));
@@ -282,6 +352,21 @@ async function freshShare(companyId: string, t: Tenant, id: string): Promise<Sha
 
 const recordingOf = (t: Tenant, s: Share) => gateway<{ frames: number }>(t, "GET", `/_computer/shares/${s.id}/recording`).catch(() => null);
 
+/** Copy a sign-in between computers (an agent's own, shared ones, an open link's), for agents. */
+async function copyLoginRoute(companyId: string, t: Tenant, agentId: string, input: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
+  const agent = await ctx.agents.get(agentId, companyId).catch(() => null);
+  const who: Who = { kind: "agent", agentId, name: agent?.name ?? "An agent" };
+  const sites = (Array.isArray(input.sites) ? input.sites : typeof input.sites === "string" ? input.sites.split(/[\n,]+/) : []).map((x) => String(x).trim()).filter(Boolean);
+  if (!sites.length || !input.from || !input.to) return { status: 400, body: { error: "from, to and sites are required, e.g. {\"from\":\"me\",\"to\":\"new:Acme GoDaddy\",\"sites\":[\"godaddy.com\"]}." } };
+  const from = await source(companyId, t, String(input.from), who);
+  if (typeof from === "string") return { status: 400, body: { error: from } };
+  const to = await destination(companyId, t, String(input.to), who, sites);
+  if (typeof to === "string") return { status: 400, body: { error: to } };
+  if (from.bot === to.bot) return { status: 400, body: { error: "from and to are the same computer." } };
+  const cookies = await copyLogin(companyId, t, from, to, sites, who);
+  return { status: 200, body: { copied: cookies, from: from.label, to: to.label, note: cookies ? `Use it with "computer": "${to.label}" (or your own, if that was the destination).` : "No sign-in cookies were found for those sites in the source computer." } };
+}
+
 /** The /pc/shares routes, for agents. */
 async function shareRoutes(companyId: string, t: Tenant, agentId: string, routeKey: string, params: Record<string, string>, input: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
   const find = async () => (await listShares(companyId)).find((x) => namesShare(x, String(params.share ?? "")));
@@ -298,7 +383,7 @@ async function shareRoutes(companyId: string, t: Tenant, agentId: string, routeK
         if (!b) return `There is no shared computer "${ref}". Use "me" for your own computer.`;
         if (!mayUse(b, agentId)) return `You may not lend from the shared computer "${b.name}".`;
         return { bot: b.bot, label: b.name };
-      });
+      }, { kind: "agent", agentId, name: agent?.name ?? "An agent" });
     }
     case "share": {
       const s = await find();
@@ -311,6 +396,18 @@ async function shareRoutes(companyId: string, t: Tenant, agentId: string, routeK
       if (!s) return { status: 404, body: { error: "No such share." } };
       await withShares(companyId, async (list) => { const x = list.find((y) => y.id === s.id); if (x) await endShare(companyId, t, x, "ended by an agent"); });
       return { status: 200, body: { ended: s.id, recording: describeShare(s, t.linkBase, t.shareKey, await recordingOf(t, s)).recording } };
+    }
+    case "keep-share": {
+      // Keep the person's sign-in now (they are done signing in), in a computer agents can use later.
+      const s = await find();
+      if (!s || s.status === "ended") return { status: 404, body: { error: "No such open share." } };
+      const agent = await ctx.agents.get(agentId, companyId).catch(() => null);
+      const who: Who = { kind: "agent", agentId, name: agent?.name ?? "An agent" };
+      const to = await destination(companyId, t, String(input.computer ?? ""), who, s.allow);
+      if (typeof to === "string") return { status: 400, body: { error: to } };
+      const cookies = await copyLogin(companyId, t, { bot: s.bot, label: `the shared link "${s.title}"` }, to, s.allow, who);
+      await withShares(companyId, async (list) => { const x = list.find((y) => y.id === s.id); if (x) { x.keep = to; x.kept = { into: to.label, cookies, at: Date.now() }; } });
+      return { status: 200, body: { kept: to.label, cookies, note: cookies ? `Use it with "computer": "${to.label}".` : "No sign-in cookies were found for those sites: they may not have signed in yet." } };
     }
     case "wait-share": {
       // Until the person opens the link, finishes, or the share ends; at most 20 s (the host's limit is 30).
@@ -439,7 +536,7 @@ const plugin = definePlugin({
       const name = (id: string | null) => (id ? agents.find((a) => a.id === id)?.name ?? "an agent" : null);
       return {
         agents: agents.map((a) => ({ id: a.id, name: a.name })),
-        shared: (t?.shared ?? []).map((b) => ({ id: b.bot, name: b.name, inUseBy: name(t!.leases.holder(b.id)) })),
+        shared: (t?.shared ?? []).map((b) => ({ id: b.bot, name: b.name, inUseBy: name(t!.leases.holder(b.id)), kept: b.id.startsWith("shared-kept-") })),
       };
     });
     // The overlay on every page: computers waiting for a person, and the one of the agent being chatted with.
@@ -490,7 +587,7 @@ const plugin = definePlugin({
         if (b) return { bot: b.bot, label: b.name };
         const a = await ctx.agents.get(ref, companyId).catch(() => null);
         return a ? { bot: a.id, label: `${a.name}'s computer` } : "Pick whose sign-in to lend: an agent or a shared computer.";
-      });
+      }, { kind: "user", name: "A team member" });
       if (r.status !== 200) throw new Error((r.body as { error: string }).error);
       return r.body;
     });
@@ -501,6 +598,19 @@ const plugin = definePlugin({
       if (!t) throw new Error("Not set up.");
       await withShares(companyId, async (list) => { const s = list.find((x) => x.id === params.id); if (s) await endShare(companyId, t, s, "ended by a team member"); });
       return { ended: params.id };
+    });
+    // A person forgetting a kept sign-in: its computer and everything signed in there are deleted.
+    ctx.actions.register("forget-kept", async (params, context) => {
+      person(context);
+      const companyId = String(params.companyId ?? "");
+      const t = await tenant(companyId);
+      const b = t?.shared.find((x) => x.bot === params.agentId && x.id.startsWith("shared-kept-"));
+      if (!t || !b) throw new Error("No such kept sign-in.");
+      await t.computer.call(b.bot, "POST", "/computers/reset", {}, 60_000).catch(() => undefined);
+      await store(companyId).set("kept", ((await store(companyId).get<KeptComputer[]>("kept")) ?? []).filter((k) => k.id !== b.id));
+      t.shared.splice(t.shared.indexOf(b), 1);
+      ctx.logger.info("kept sign-in forgotten", { companyId, computer: b.name });
+      return { forgotten: b.name };
     });
     // A person freeing a shared computer an agent is holding on to.
     ctx.actions.register("free-shared", async (params, context) => {
@@ -656,7 +766,11 @@ const plugin = definePlugin({
     const nameOf = async (id: string | null) => (id ? (await ctx.agents.get(id, companyId).catch(() => null))?.name ?? "another agent" : null);
     const query = Object.fromEntries(Object.entries(input.query).map(([k, v]) => [k, Array.isArray(v) ? v[0] : v]));
     const body = input.body && typeof input.body === "object" && !Array.isArray(input.body) ? (input.body as Record<string, unknown>) : {};
-    if (["shares", "create-share", "share", "end-share", "wait-share"].includes(input.routeKey)) {
+    if (input.routeKey === "copy-login") {
+      const r = await copyLoginRoute(companyId, t, agentId, { ...query, ...body }).catch((err) => ({ status: 502, body: { error: errText(err) } }));
+      return { status: r.status, body: r.body };
+    }
+    if (["shares", "create-share", "share", "end-share", "wait-share", "keep-share"].includes(input.routeKey)) {
       const r = await shareRoutes(companyId, t, agentId, input.routeKey, input.params, { ...query, ...body });
       return { status: r.status, body: r.body };
     }

@@ -60,3 +60,15 @@ test("a share as agents and the page see it: links while it is open, a replay al
   s.status = "ended";
   assert.equal(describe(s, "https://os.example.com", key).link, null);
 });
+
+test("keeping a sign-in: only for login links, sites as hosts, kept computers' ids", async () => {
+  const { hostsFrom, keepNotice, keptId } = await import("../src/shares.ts");
+  const r = parseShareInput({ allow: ["sso.godaddy.com", "dcc.godaddy.com/control/*"], keep: "new:Acme GoDaddy" });
+  assert.ok(r.ok && r.value.keep === "new:Acme GoDaddy");
+  assert.match((parseShareInput({ allow: ["x.com"], mode: "lend", lend: "me", keep: "new:X" }) as { error: string }).error, /only for "login"/);
+  assert.deepEqual(hostsFrom(["https://dcc.godaddy.com/control/*", "*.godaddy.com", "sso.godaddy.com", "a*.b.com", "nodot"]), ["dcc.godaddy.com", "godaddy.com", "sso.godaddy.com"]);
+  assert.equal(keptId("Acme – GoDaddy!", []), "shared-kept-acme-godaddy");
+  assert.equal(keptId("Acme GoDaddy", ["shared-kept-acme-godaddy"]), "shared-kept-acme-godaddy-2");
+  assert.match(keptId("Acme GoDaddy", []), /^shared-[a-z0-9-]{1,50}$/, "the same shape as settings' shared computers");
+  assert.match(keepNotice("BadAaas"), /^BadAaas will keep this sign-in.*changing your password/);
+});

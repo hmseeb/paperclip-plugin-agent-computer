@@ -300,7 +300,7 @@ async function sharedLink(req: Request, url: URL, server: Bun.Server<Data>): Pro
   if (!action) return isError ? html(closedPage(s.error), s.status) : html(sharePage());
   if (isError) return json({ error: s.error }, s.status);
   if (action === "info") {
-    return json({ title: s.title, mode: s.mode, exp: s.exp, status: s.status,
+    return json({ title: s.title, mode: s.mode, exp: s.exp, status: s.status, notice: s.notice ?? null,
       allow: s.allow.map((p) => ({ label: p.replace(/^[a-z][a-z0-9+.-]*:\/\//i, ""), url: openable(p) })) });
   }
   if (action === "stream") {
@@ -371,6 +371,7 @@ async function shareAdmin(req: Request, url: URL): Promise<Response> {
     const s: ShareMeta = {
       id, bot: b.bot, exp: b.exp, mode: b.mode === "lend" ? "lend" : "login", title: String(b.title ?? "").slice(0, 120),
       allow: b.allow.filter((x): x is string => typeof x === "string").slice(0, 100), start: String(b.start ?? ""),
+      notice: typeof b.notice === "string" ? b.notice.slice(0, 500) : null,
       // What happened on the link is known here; the plugin's word wins only to end it.
       status: had?.status === "ended" ? "ended" : b.status === "ended" ? "ended" : had?.status ?? "active",
       createdAt: had?.createdAt ?? b.createdAt ?? Date.now(), openedAt: had?.openedAt, doneAt: had?.doneAt, endedAt: had?.endedAt,

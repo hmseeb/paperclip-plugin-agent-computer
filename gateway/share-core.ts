@@ -19,6 +19,8 @@ export interface ShareMeta {
   /** The addresses the person may open (computer's page policy), shown on the link's page. */
   allow: string[];
   start: string;
+  /** Shown to the person: e.g. that their sign-in is kept afterwards, by whom, and how to undo it. */
+  notice?: string | null;
   status: ShareStatus;
   createdAt: number;
   openedAt?: number;

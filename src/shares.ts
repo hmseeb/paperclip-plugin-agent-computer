@@ -23,6 +23,14 @@ export interface Share {
   exp: number;
   createdAt: number;
   createdBy: { kind: "agent" | "user"; id: string; name: string };
+  /**
+   * For "login": keep their sign-in afterwards in this shared computer (it is copied in when the share
+   * ends, if they opened it). The person sees `notice` on their screen.
+   */
+  keep?: { bot: string; label: string };
+  notice?: string;
+  /** What was kept when it ended. */
+  kept?: { into: string; cookies: number; at: number } | null;
   /** For "lend": whose sign-in was copied in, and for which sites. */
   lendFrom?: { bot: string; label: string; copied: number };
   task?: string | null;
@@ -33,7 +41,7 @@ export interface Share {
   endReason?: string;
 }
 
-export interface ShareInput { mode: ShareMode; title: string; allow: string[]; start: string; hours: number; lend: string | null; task: string | null }
+export interface ShareInput { mode: ShareMode; title: string; allow: string[]; start: string; hours: number; lend: string | null; task: string | null; keep: string | null }
 
 const list = (v: unknown): string[] =>
   (Array.isArray(v) ? v : typeof v === "string" ? v.split(/[\n,]+/) : []).map((x) => String(x).trim()).filter(Boolean);
@@ -56,7 +64,9 @@ export function parseShareInput(input: Record<string, unknown>): { ok: true; val
   if (mode === "lend" && !lend) return { ok: false, error: "lend is required for mode \"lend\": whose sign-in to copy in (\"me\" for your own computer, or a shared computer's name)." };
   const title = (typeof input.title === "string" && input.title.trim() ? input.title.trim() : "Shared browser").slice(0, 120);
   const task = typeof input.task === "string" && input.task.trim() ? input.task.trim().slice(0, 40) : null;
-  return { ok: true, value: { mode, title, allow, start, hours: Math.min(hoursRaw, MAX_HOURS), lend: mode === "lend" ? lend : null, task } };
+  const keep = typeof input.keep === "string" && input.keep.trim() ? input.keep.trim().slice(0, 80) : null;
+  if (keep && mode !== "login") return { ok: false, error: "keep is only for \"login\" shares: it keeps the person's own sign-in." };
+  return { ok: true, value: { mode, title, allow, start, hours: Math.min(hoursRaw, MAX_HOURS), lend: mode === "lend" ? lend : null, task, keep } };
 }
 
 export function newShare(v: ShareInput, randomBytes: Uint8Array, createdBy: Share["createdBy"], now = Date.now()): Share {
@@ -78,6 +88,8 @@ export function describe(s: Share, base: string, key: Buffer, recording?: { fram
     task: s.task ?? null, openedAt: s.openedAt ? new Date(s.openedAt).toISOString() : null, doneAt: s.doneAt ? new Date(s.doneAt).toISOString() : null,
     endedAt: s.endedAt ? new Date(s.endedAt).toISOString() : null, endReason: s.endReason ?? null,
     lendFrom: s.lendFrom ? { from: s.lendFrom.label, cookiesCopied: s.lendFrom.copied } : null,
+    keep: s.keep ? s.keep.label : null,
+    kept: s.kept ? { into: s.kept.into, cookies: s.kept.cookies, at: new Date(s.kept.at).toISOString() } : null,
     link: open ? shareLink(base, key, s) : null,
     recording: recording === undefined ? undefined : { frames: recording?.frames ?? 0, replay: replayLink(base, key, s) },
   };
@@ -85,3 +97,20 @@ export function describe(s: Share, base: string, key: Buffer, recording?: { fram
 
 /** Whether a call names this share: its id or its computer (share-<id>). */
 export const names = (s: Share, ref: string) => ref === s.id || ref === s.bot;
+
+/** What the person on a "keep" link reads: who keeps their sign-in, why, and how to undo it. */
+export const keepNotice = (company: string) =>
+  `${company} will keep this sign-in after you finish, to complete and maintain the setup. You can revoke it any time by changing your password or signing out of other sessions.`;
+
+/** Sites as hosts, for copying a sign-in: "https://dcc.godaddy.com/x" -> "dcc.godaddy.com". */
+export const hostsFrom = (sites: string[]) =>
+  [...new Set(sites.map((p) => p.trim().replace(/^[a-z][a-z0-9+.-]*:\/\//i, "").split("/")[0].toLowerCase().replace(/:\d+$/, "").replace(/^\*\./, "")).filter((h) => h && !h.includes("*") && h.includes(".")))];
+
+/** A shared computer the plugin made to keep a sign-in (alongside the ones in the settings). */
+export interface KeptComputer { id: string; name: string; createdAt: number; createdBy: string; sites: string[] }
+export const keptId = (name: string, taken: string[]) => {
+  const base = `shared-kept-${name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 30) || "signin"}`;
+  let id = base;
+  for (let i = 2; taken.includes(id); i++) id = `${base}-${i}`;
+  return id;
+};

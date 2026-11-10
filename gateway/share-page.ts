@@ -33,7 +33,7 @@ canvas{display:block;background:#fff;touch-action:none;outline:none}
 #cover p{max-width:460px;font-size:16px}
 @media (max-width:640px){#title{display:none}#access span.l{display:none}}
 </style></head><body>
-<div id="bar"><div id="title">Shared browser</div><div id="access"><span class="l">You can access:</span></div><div id="left"></div><button id="done">I'm done</button></div>
+<div id="bar"><div id="title">Shared browser</div><div id="access"><span class="l">You can access:</span></div><button id="kept" class="chip" style="display:none">&#128274; Sign-in kept</button><div id="left"></div><button id="done">I'm done</button></div>
 <div id="stage"><canvas id="screen" tabindex="0" width="1280" height="800" aria-label="Shared browser"></canvas></div>
 <div id="note"></div><div id="cover"><p>Opening the browser…</p></div>
 <script>
@@ -65,6 +65,13 @@ canvas{display:block;background:#fff;touch-action:none;outline:none}
         if (a.url) chip.onclick = () => { if (!driving()) return; post("/go", { url: a.url }).then((x) => x.ok ? null : x.json().then((j) => toast(j.error || "Could not open that.", 4000))); };
         access.appendChild(chip);
       }
+    }
+    if (info.notice) {
+      const kept = $("kept");
+      kept.style.display = "inline-block";
+      kept.title = info.notice;
+      kept.onclick = () => toast(info.notice, 10000);
+      if (!before) toast(info.notice, 10000);
     }
     if (info.status === "ended") { stop("This shared browser has ended. You can close this page."); return info; }
     if (info.status === "done") {

@@ -28,6 +28,12 @@ they hold the computer.
   Namecheap, so an agent can set up DNS there after they press "I'm done"), or they use one of yours
   without ever seeing its password (one site's sign-in is copied in from an agent's or a shared
   computer). Made from the Computers page (**Shared links**) or by an agent (`POST /pc/shares`).
+- **Kept sign-ins.** A "they sign in" link can keep their sign-in afterwards in a shared computer
+  (an existing one, or a new one it makes): their screen says so and how to revoke it, and when the
+  link ends their sign-in for the listed sites is copied there, so agents use it later without
+  asking again. Agents can also copy a sign-in between computers (`POST /pc/copy-login`: their own,
+  a shared one, an open link's, or a new shared computer). Every copy is logged; **Forget sign-in**
+  on the Computers page deletes a kept one.
 - **Proxies.** Send the computers' traffic through proxies (residential ones, for example), tested
   before saving, per agent or shared computer. Choose what happens when one stops working: keep
   working over the computer's own connection, or stop.

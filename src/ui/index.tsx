@@ -290,7 +290,8 @@ export function ComputersPage({ context }: PluginPageProps) {
     const timer = setInterval(load, 3000);
     return () => { live = false; clearInterval(timer); };
   }, [companyId]);
-  const [list, setList] = useState<{ agents: { id: string; name: string }[]; shared: { id: string; name: string; inUseBy: string | null }[] } | null>(null);
+  const [list, setList] = useState<{ agents: { id: string; name: string }[]; shared: { id: string; name: string; inUseBy: string | null; kept?: boolean }[] } | null>(null);
+  const forgetKept = usePluginAction("forget-kept");
   const [agentId, setAgentId] = useState<string | null>(() => new URLSearchParams(window.location.search).get("agent"));
   useEffect(() => {
     if (!companyId) return;
@@ -340,6 +341,8 @@ export function ComputersPage({ context }: PluginPageProps) {
               {item(b.id, b.name, b.inUseBy ? `in use by ${b.inUseBy}` : "free")}
               {b.inUseBy ? <button style={{ ...s.button, padding: "2px 8px", fontSize: 12, justifySelf: "start", marginLeft: 8 }}
                 onClick={() => void freeShared({ companyId, agentId: b.id }).then(() => computers({ companyId }).then((r) => setList(r as never)))}>Free it</button> : null}
+              {b.kept ? <button style={{ ...s.button, ...s.bad, padding: "2px 8px", fontSize: 12, justifySelf: "start", marginLeft: 8 }} title="Delete this computer and the sign-in kept there"
+                onClick={() => { if (confirm(`Forget "${b.name}"? The sign-in kept there is deleted; agents can no longer use it.`)) void forgetKept({ companyId, agentId: b.id }).then(() => computers({ companyId }).then((r) => setList(r as never))); }}>Forget sign-in</button> : null}
             </div>
           ))}
           <div style={{ height: 12 }} />
@@ -364,6 +367,7 @@ interface ShareRow {
   id: string; computer: string; title: string; mode: "login" | "lend"; status: "active" | "done" | "ended"; allow: string[]; start: string;
   expiresAt: string; createdAt: string; createdBy: string; openedAt: string | null; doneAt: string | null; endedAt: string | null; endReason: string | null;
   lendFrom: { from: string; cookiesCopied: number } | null; link: string | null; recording?: { frames: number; replay: string } | null;
+  keep: string | null; kept: { into: string; cookies: number; at: string } | null;
 }
 const when = (iso: string | null) => (iso ? new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "");
 const stateOf = (r: ShareRow) => r.status === "ended" ? `ended (${r.endReason ?? "closed"})` : r.status === "done" ? (r.mode === "login" ? "signed in; the agent has it" : "finished") : r.openedAt ? "in use" : "not opened yet";
@@ -390,7 +394,7 @@ function SharedLinks({ companyId, agents, sharedComputers, onWatch }: { companyI
   const [rows, setRows] = useState<ShareRow[] | null>(null);
   const [max, setMax] = useState(3);
   const [base, setBase] = useState<string | null>(null);
-  const [form, setForm] = useState({ mode: "login" as "login" | "lend", title: "", allow: "", start: "", hours: "48", lend: "" });
+  const [form, setForm] = useState({ mode: "login" as "login" | "lend", title: "", allow: "", start: "", hours: "48", lend: "", keep: "", keepName: "" });
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ ok: boolean; text: string; link?: string } | null>(null);
   const load = useCallback(() => shares({ companyId }).then((r) => {
@@ -403,7 +407,8 @@ function SharedLinks({ companyId, agents, sharedComputers, onWatch }: { companyI
   const submit = async () => {
     setBusy(true); setNote(null);
     try {
-      const r = (await create({ companyId, mode: form.mode, title: form.title, allow: form.allow, start: form.start, hours: Number(form.hours), lend: form.mode === "lend" ? form.lend : "" })) as ShareRow;
+      const keep = form.mode !== "login" || !form.keep ? "" : form.keep === "__new" ? `new:${form.keepName.trim()}` : form.keep;
+      const r = (await create({ companyId, mode: form.mode, title: form.title, allow: form.allow, start: form.start, hours: Number(form.hours), lend: form.mode === "lend" ? form.lend : "", keep })) as ShareRow;
       setNote({ ok: true, text: "Link ready. Send it to the person; it works without a Paperclip login until it expires.", link: r.link ?? undefined });
       setForm({ ...form, title: "", allow: "", start: "" });
       void load();
@@ -440,6 +445,16 @@ function SharedLinks({ companyId, agents, sharedComputers, onWatch }: { companyI
             </select>
           </Field>
         </div>
+        {form.mode === "login" ? <Field label="Keep their sign-in afterwards" help="Their sign-in for the addresses above is copied into this shared computer when the link ends (if they opened it), so agents can use it later without asking again. They see a notice saying so. Forget it any time from the sidebar.">
+          <div style={{ display: "grid", gridTemplateColumns: form.keep === "__new" ? "minmax(0,1fr) minmax(0,1fr)" : "minmax(0,1fr)", gap: 8 }}>
+            <select style={s.input} value={form.keep} onChange={(e) => setForm({ ...form, keep: e.target.value })}>
+              <option value="">Don't keep it (wiped when the link ends)</option>
+              {sharedComputers.map((b) => <option key={b.id} value={b.id}>Keep in {b.name}</option>)}
+              <option value="__new">Keep in a new shared computer…</option>
+            </select>
+            {form.keep === "__new" ? <input style={s.input} value={form.keepName} onChange={(e) => setForm({ ...form, keepName: e.target.value })} placeholder="Acme – GoDaddy" /> : null}
+          </div>
+        </Field> : null}
         {form.mode === "lend" ? <Field label="Signed in as" help="Only the sign-in for the addresses above is copied from this computer.">
           <select style={s.input} value={form.lend} onChange={(e) => setForm({ ...form, lend: e.target.value })}>
             <option value="">Pick a computer</option>
@@ -448,7 +463,7 @@ function SharedLinks({ companyId, agents, sharedComputers, onWatch }: { companyI
           </select>
         </Field> : null}
         <div style={s.row}>
-          <button style={{ ...s.button, ...s.primary }} disabled={busy || !form.allow.trim() || !base || (form.mode === "lend" && !form.lend) || open.length >= max} onClick={() => void submit()}>{busy ? "Making the link…" : "Make the link"}</button>
+          <button style={{ ...s.button, ...s.primary }} disabled={busy || !form.allow.trim() || !base || (form.mode === "lend" && !form.lend) || (form.mode === "login" && form.keep === "__new" && !form.keepName.trim()) || open.length >= max} onClick={() => void submit()}>{busy ? "Making the link…" : "Make the link"}</button>
           {open.length >= max ? <span style={s.help}>{max} links are open: end one first.</span> : null}
         </div>
         {note ? <div style={{ ...(note.ok ? s.ok : s.bad), display: "grid", gap: 6 }}>{note.text}
@@ -465,6 +480,7 @@ function SharedLinks({ companyId, agents, sharedComputers, onWatch }: { companyI
             <div style={s.help}>
               {r.mode === "login" ? "They sign in" : `Our account (${r.lendFrom?.from ?? "?"}, ${r.lendFrom?.cookiesCopied ?? 0} sign-in cookies)`} · by {r.createdBy} {when(r.createdAt)}
               {r.status !== "ended" ? ` · expires ${when(r.expiresAt)}` : ` · ended ${when(r.endedAt)}`}
+              {r.kept ? ` · sign-in kept in ${r.kept.into} (${r.kept.cookies} cookies)` : r.keep ? ` · keeps the sign-in in ${r.keep}` : ""}
             </div>
             <div style={{ ...s.help, fontFamily: "ui-monospace, monospace" }}>{r.allow.join("  ·  ")}</div>
             <div style={s.row}>
