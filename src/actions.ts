@@ -117,7 +117,14 @@ export async function handle(d: ActionDeps, agentId: string, routeKey: string, i
       }
       case "read": res = ok(await c.call(b.bot, "GET", "/read")); break;
       case "look": res = ok(await act("/snapshot", {})); break;
-      case "click": res = ok(await act("/click", { ref: str(input.ref), snapshotId: num(input.snapshotId) })); break;
+      case "click": {
+        // By ref (from /look), or by position (x,y in /screenshot pixels) for a control /look cannot name.
+        const x = num(input.x), y = num(input.y);
+        res = ok(await (str(input.ref) || x === undefined || y === undefined
+          ? act("/click", { ref: str(input.ref), snapshotId: num(input.snapshotId) })
+          : freshly("/click", { x, y })));
+        break;
+      }
       case "type": res = ok(await act("/type", { ref: str(input.ref), snapshotId: num(input.snapshotId), text: typeof input.text === "string" ? input.text : "", submit: input.submit === true || input.submit === "true" })); break;
       case "key": res = ok(await (str(input.ref) ? act : freshly)("/key", { key: str(input.key), ...(str(input.ref) ? { ref: str(input.ref), snapshotId: num(input.snapshotId) } : {}) })); break;
       case "scroll": res = ok(await freshly("/scroll", { deltaY: num(input.deltaY) ?? 600 })); break;

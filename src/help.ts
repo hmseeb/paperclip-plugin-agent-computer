@@ -19,6 +19,9 @@ them with your Paperclip API credentials:
 3. **look** before acting: it lists what you can act on, each with a \`ref\`, plus a \`snapshotId\`.
 4. **click** or **type** with that \`ref\` and \`snapshotId\`. After the page changes, look again:
    old refs stop working (you get a 409 saying so).
+   Icons and menus with no proper label are listed with role \`clickable\`. If a control is not in
+   the list at all, take a **screenshot** and **click** it by \`{"x","y"}\` (screenshot pixels, top-left
+   is 0,0), then look again to check it worked.
 5. **read** returns the page's text again; **screenshot** returns a PNG as base64 when the layout
    matters: \`curl -s "\${H[@]}" "$B/screenshot" | jq -r .base64 | base64 -d > /tmp/page.png\`, then view it.
 
@@ -108,7 +111,7 @@ GET  /status                     who has the computer (\`holder\`: bot or human)
 GET  /wait                       returns when a person is done; call again until done is true
 POST /open        {"url"}
 POST /look        {}
-POST /click       {"ref","snapshotId"}
+POST /click       {"ref","snapshotId"}   or {"x","y"} in /screenshot pixels, for a control /look does not list
 POST /type        {"ref","snapshotId","text","submit":false}
 POST /key         {"key":"Enter"}  optionally with "ref","snapshotId" to press it in a field
 POST /scroll      {"deltaY":600}   negative scrolls up

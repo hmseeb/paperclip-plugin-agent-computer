@@ -20,6 +20,10 @@ chrome a person driving it needs:
   listing what is allowed), `POST /viewport {width,height}` sizes it to its viewer's window (the
   screencast follows, so clicks map 1:1), and `POST /cookies/import {from, hosts}` copies one
   site's cookies from another browser.
+- Controls with no ARIA role: `/snapshot` also lists elements with a pointer cursor (icons, row menus,
+  custom dropdowns) as role `clickable`, after the real controls, named from their accessible name or
+  the text just before them. `POST /click {x,y}` clicks by viewport position (aimed from `/screenshot`)
+  for anything a snapshot cannot name.
 - `SCREENCAST_QUALITY` sets the live screen's JPEG quality (default 70; 40 suits a home upload).
 
 The pinned commit is in `OPENBOT_REF`. CI builds the image as `ghcr.io/hmseeb/agent-computer` for amd64

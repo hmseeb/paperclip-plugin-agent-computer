@@ -1,5 +1,5 @@
 diff --git a/agent-computer/Dockerfile b/agent-computer/Dockerfile
-index f706ec83..e9baeca5 100644
+index f706ec8..e9baeca 100644
 --- a/agent-computer/Dockerfile
 +++ b/agent-computer/Dockerfile
 @@ -41,6 +41,8 @@ RUN mkdir -p /workspace
@@ -11,8 +11,122 @@ index f706ec83..e9baeca5 100644
  EXPOSE 4100
  # Readiness is exposed through Docker health so the supervisor need not know the network route.
  HEALTHCHECK --interval=2s --timeout=3s --start-period=2s --retries=30 \
+diff --git a/agent-computer/src/aria-snapshot.ts b/agent-computer/src/aria-snapshot.ts
+index 037ba14..72ee220 100644
+--- a/agent-computer/src/aria-snapshot.ts
++++ b/agent-computer/src/aria-snapshot.ts
+@@ -67,6 +67,7 @@ const CHECKABLE_ROLES = new Set([
+  */
+ export type SnapshotElement = {
+   ref: string;
++  /** An ARIA role, or `clickable` for a control with no role that has a pointer cursor. */
+   role: string;
+   name: string;
+   /** Present for form controls, so the Bot can tell an empty field from a filled one. */
+@@ -266,6 +267,34 @@ function optionsOf(
+   return options.length ? { options, selected } : null;
+ }
+ 
++/**
++ * A control with no ARIA role that a person can still click: an icon, a row menu, a custom dropdown.
++ *
++ * Playwright marks these `[cursor=pointer]` next to their ref. Many apps (GoHighLevel's phone-number
++ * row menu, its funnel-builder dropdowns) draw controls as plain `div`s or `svg`s, so the role
++ * allow-list above never offered them and a Bot had nothing it could click. Reported with the role
++ * `clickable`, named from the accessible name (aria-label, title, svg title) or, failing that, the
++ * underlying role so the Bot can still tell an icon from a row.
++ */
++function toClickable(
++  descriptor: Descriptor,
++  nearbyText: string,
++): SnapshotElement | null {
++  if (INTERACTIVE_ROLES.has(descriptor.role)) return null;
++  if (descriptor.flags.get("cursor") !== "pointer") return null;
++  const ref = descriptor.flags.get("ref");
++  if (!ref) return null;
++  const name = cutAtCodeUnits(descriptor.name, 200);
++  if (name) return { ref, role: "clickable", name };
++  // An icon with no name: say what text comes just before it on the page, so a Bot can tell the menu
++  // on one table row from the menu on the next.
++  const near = cutAtCodeUnits(nearbyText, 60);
++  return {
++    ref,
++    role: "clickable",
++    name: near ? `(${descriptor.role}) after "${near}"` : `(${descriptor.role})`,
++  };
++}
+ /** Turn an aria snapshot into the flat element list the tool contract publishes. */
+ export function parseAriaSnapshot(yaml: string): {
+   elements: SnapshotElement[];
+@@ -291,35 +320,51 @@ export function parseAriaSnapshot(yaml: string): {
+     return { elements: [], truncated: false };
+   }
+ 
+-  /** Depth first: the tree nests by containment, and a flat list is what a Bot acts on. */
+-  const walk = (node: unknown): void => {
++  /** Clickables without a role, appended after the real controls so they never crowd a form out. */
++  const clickables: SnapshotElement[] = [];
++  /** The last accessible name seen in document order, to describe an unnamed icon by what precedes it. */
++  let lastText = "";
++  /**
++   * Depth first: the tree nests by containment, and a flat list is what a Bot acts on.
++   * `covered` is true below an element already listed: its children inherit the pointer cursor, and
++   * listing every nested `div` of one clickable row would bury the list in duplicates.
++   */
++  const walk = (node: unknown, covered: boolean): void => {
+     if (truncated) return;
+-
+     if (Array.isArray(node)) {
+-      for (const child of node) walk(child);
++      for (const child of node) walk(child, covered);
+       return;
+     }
+-
++    const visit = (key: string, value: unknown): boolean => {
++      const descriptor = parseDescriptor(key);
++      if (!descriptor) return false;
++      const nearby = lastText;
++      if (descriptor.name.trim()) lastText = descriptor.name.trim();
++      const element = toElement(descriptor, value);
++      if (element) {
++        push(element);
++        return true;
++      }
++      if (covered) return false;
++      const clickable = toClickable(descriptor, nearby);
++      if (clickable) clickables.push(clickable);
++      return clickable !== null;
++    };
+     if (typeof node === "string") {
+       // An entry with no value: `- button "Submit order" [ref=e44]`.
+-      const descriptor = parseDescriptor(node);
+-      const element = descriptor ? toElement(descriptor, undefined) : null;
+-      if (element) push(element);
++      visit(node, undefined);
+       return;
+     }
+-
+     if (node && typeof node === "object") {
+       for (const [key, value] of Object.entries(node)) {
+-        const descriptor = parseDescriptor(key);
+-        const element = descriptor ? toElement(descriptor, value) : null;
+-        if (element) push(element);
++        const listed = visit(key, value);
+         // Descend regardless of whether this entry was actionable: a `group "Pizza Size"` is not, and
+         // its radios are.
+-        if (value && typeof value === "object") walk(value);
++        if (value && typeof value === "object") walk(value, covered || listed);
+       }
+     }
+   };
+-
+-  walk(tree);
++  walk(tree, false);
++  for (const clickable of clickables) push(clickable);
+   return { elements, truncated };
+ }
 diff --git a/agent-computer/src/egress.ts b/agent-computer/src/egress.ts
-index bd651d3f..44c78fee 100644
+index bd651d3..44c78fe 100644
 --- a/agent-computer/src/egress.ts
 +++ b/agent-computer/src/egress.ts
 @@ -55,6 +55,8 @@ export function egressFor(
@@ -199,7 +313,7 @@ index bd651d3f..44c78fee 100644
      setEgressPolicy(botId, null);
      return Response.json({ botId, policy: null, filtering: filter !== null });
 diff --git a/agent-computer/src/index.ts b/agent-computer/src/index.ts
-index b6640d13..f06d3bf1 100644
+index b6640d1..0095597 100644
 --- a/agent-computer/src/index.ts
 +++ b/agent-computer/src/index.ts
 @@ -43,6 +43,7 @@ import {
@@ -341,8 +455,46 @@ index b6640d13..f06d3bf1 100644
        // A person's input, by pixel. The Bot addresses elements by reference because it reads a list; a
        // person addresses them by pointing, because they are looking at a picture. Different problem,
        // different endpoint, and only usable while they hold the wheel.
+@@ -1468,6 +1570,9 @@ serve<StreamData>({
+ 
+ type ActionBody = {
+   ref?: unknown;
++  /** A click by position instead of ref, in viewport pixels, for controls a snapshot cannot name. */
++  x?: unknown;
++  y?: unknown;
+   snapshotId?: unknown;
+   text?: unknown;
+   key?: unknown;
+@@ -1579,8 +1684,26 @@ async function performAction(
+     typeof body.snapshotId === "number" ? body.snapshotId : undefined;
+   const ref = typeof body.ref === "string" && body.ref ? body.ref : undefined;
+ 
++  if (action === "/click" && !ref && (body.x !== undefined || body.y !== undefined)) {
++    // A click by position, for controls with no ref (a canvas, a control the snapshot cannot name).
++    // Aimed from /screenshot, which is the viewport at 1:1. Clamped like /human/click: a pixel outside
++    // is a rounding artefact of scaling the screenshot. Stop is checked first so it still wins.
++    const x = typeof body.x === "number" ? body.x : Number.NaN;
++    const y = typeof body.y === "number" ? body.y : Number.NaN;
++    if (!Number.isFinite(x) || !Number.isFinite(y)) {
++      throw new Error("A click by position needs a numeric x and y inside the page.");
++    }
++    if (signal?.aborted) throw new Error("Stopped before the click.");
++    const viewport = target.viewportSize() ?? VIEWPORT;
++    const at = {
++      x: Math.min(Math.max(Math.round(x), 0), viewport.width - 1),
++      y: Math.min(Math.max(Math.round(y), 0), viewport.height - 1),
++    };
++    await target.mouse.click(at.x, at.y);
++    return { action: "click", x: at.x, y: at.y, url: target.url() };
++  }
+   if (action === "/click") {
+-    if (!ref) throw new Error("A click needs the ref of an element to click.");
++    if (!ref) throw new Error("A click needs the ref of an element to click, or an x and y.");
+     await (await resolveRef(session, target, ref, expected)).click(acting);
+     return { action: "click", ref, url: target.url() };
+   }
 diff --git a/agent-computer/src/profiles.ts b/agent-computer/src/profiles.ts
-index 3aeb838e..8feef29c 100644
+index 3aeb838..8feef29 100644
 --- a/agent-computer/src/profiles.ts
 +++ b/agent-computer/src/profiles.ts
 @@ -36,10 +36,11 @@
@@ -479,7 +631,7 @@ index 3aeb838e..8feef29c 100644
      },
 diff --git a/agent-computer/src/share.ts b/agent-computer/src/share.ts
 new file mode 100644
-index 00000000..d22de46f
+index 0000000..d22de46
 --- /dev/null
 +++ b/agent-computer/src/share.ts
 @@ -0,0 +1,143 @@
@@ -626,9 +778,40 @@ index 00000000..d22de46f
 +  if (picked.length) await to.addCookies(picked);
 +  return picked.length;
 +}
+diff --git a/agent-computer/tests/aria-snapshot.test.ts b/agent-computer/tests/aria-snapshot.test.ts
+index 79d93d5..cc056e9 100644
+--- a/agent-computer/tests/aria-snapshot.test.ts
++++ b/agent-computer/tests/aria-snapshot.test.ts
+@@ -386,3 +386,26 @@ describe("parseAriaSnapshot, dropdowns", () => {
+     expect(elements[0]?.options).toHaveLength(50);
+   });
+ });
++
++describe("clickable controls without a role", () => {
++  test("lists a pointer-cursor element with no role, after the real controls", () => {
++    const yaml = [
++      "- generic [ref=e1] [cursor=pointer]:",
++      "  - img \"More actions\" [ref=e2]",
++      "- button \"Next\" [ref=e3]",
++      "- img [ref=e4] [cursor=pointer]",
++      "- generic \"Plain text\" [ref=e5]",
++    ].join("\n");
++    const { elements } = parseAriaSnapshot(yaml);
++    expect(elements.map((e) => e.ref)).toEqual(["e3", "e1", "e4"]);
++    expect(elements[1]).toEqual({ ref: "e1", role: "clickable", name: "(generic)" });
++    expect(elements[2]).toEqual({ ref: "e4", role: "clickable", name: '(img) after "Next"' });
++  });
++  test("does not list children of a listed control again", () => {
++    const yaml = [
++      "- button \"Row\" [ref=e1] [cursor=pointer]:",
++      "  - generic [ref=e2] [cursor=pointer]",
++    ].join("\n");
++    expect(parseAriaSnapshot(yaml).elements.map((e) => e.ref)).toEqual(["e1"]);
++  });
++});
 diff --git a/agent-computer/tests/private-network.test.ts b/agent-computer/tests/private-network.test.ts
 new file mode 100644
-index 00000000..80f4ea26
+index 0000000..80f4ea2
 --- /dev/null
 +++ b/agent-computer/tests/private-network.test.ts
 @@ -0,0 +1,8 @@
@@ -642,7 +825,7 @@ index 00000000..80f4ea26
 +});
 diff --git a/agent-computer/tests/runtime-upstream.test.ts b/agent-computer/tests/runtime-upstream.test.ts
 new file mode 100644
-index 00000000..8eb6b8f0
+index 0000000..8eb6b8f
 --- /dev/null
 +++ b/agent-computer/tests/runtime-upstream.test.ts
 @@ -0,0 +1,12 @@
@@ -660,7 +843,7 @@ index 00000000..8eb6b8f0
 +});
 diff --git a/agent-computer/tests/share.test.ts b/agent-computer/tests/share.test.ts
 new file mode 100644
-index 00000000..90ff2dae
+index 0000000..90ff2da
 --- /dev/null
 +++ b/agent-computer/tests/share.test.ts
 @@ -0,0 +1,55 @@
